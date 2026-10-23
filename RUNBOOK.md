@@ -169,11 +169,36 @@ Shape `[1] != 256` causes immediate hard failure. Captures with fewer than `min_
 ## 7. Build windows
 
 ```bash
+# Build all windows from intermediate captures
 python scripts/build_windows.py --config configs/experiment.yaml
+
+# Force rebuild
+python scripts/build_windows.py --config configs/experiment.yaml --force
+
+# Quick smoke (synthetic data, no real files needed)
+python scripts/build_windows.py --smoke
 ```
 
-Tiles every intermediate capture into `(150, 256)` windows and writes
-`derived/windows/{dev,val}/` and `derived/windows_index.csv`.
+**Expected output (smoke)**
+```
+[smoke] Testing windowing functions on synthetic data ...
+[smoke] Canonical: shape (150, 256) OK
+[smoke] Dev windows: 2 from 200-row capture OK
+[smoke] Short capture: reflect-padded to (150, 256) OK
+[smoke] Determinism: same input -> same output OK
+[smoke] No cross-capture leakage OK
+[smoke] Index CSV + .npy files verified OK
+[smoke] All smoke checks passed ✓
+```
+
+**What the real run produces:**
+- `derived/windows/dev/{capture_id}__{start:05d}.npy` — float32 (150, 256), sliding stride 50
+- `derived/windows/val/{capture_id}__00000.npy` — float32 (150, 256), canonical central window only
+- `derived/windows_index.csv` — window_id, capture_id, room, activity, split, start, config_hash
+
+Validation captures get **one canonical window** (central 150 rows, reflect-padded if short).
+Development captures get **sliding windows** (stride 50, tail-anchored to avoid data loss).
+Windows never cross capture boundaries. Each window is traceable via `start` index + `capture_id`.
 
 ---
 
