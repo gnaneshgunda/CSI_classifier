@@ -129,15 +129,44 @@ python scripts/inspect_data.py --smoke
 ## 6. Build intermediate representations (real data)
 
 ```bash
+# Build all captures (skips already-built .npy files)
 python scripts/build_intermediate.py --config configs/experiment.yaml
+
+# Force rebuild everything
+python scripts/build_intermediate.py --config configs/experiment.yaml --force
+
+# Process one room only
+python scripts/build_intermediate.py --config configs/experiment.yaml --room A
+
+# Use multiple workers (may fail on Windows due to scapy fork issues)
+python scripts/build_intermediate.py --config configs/experiment.yaml --workers 4
+
+# Quick smoke (synthetic data, no real files needed)
+python scripts/build_intermediate.py --smoke
 ```
 
-Reads raw PCAP (Room A) and CSV (Room B), cleans them, and writes
-`derived/intermediate/{A,B}/{capture_id}.npy` plus `derived/manifest.csv`.
+**Expected output (smoke)**
+```
+[smoke] Building synthetic intermediate data ...
+[smoke] 3 captures processed
+[smoke] Manifest verified: 3 rows
+[smoke] Shape guard (256 subcarriers): OK
+[smoke] All smoke checks passed ✓
+```
+
+**What the real run produces:**
+- `derived/intermediate/A/{capture_id}.npy` — float32 (n_clean, 256) per Room-A capture
+- `derived/intermediate/B/{capture_id}.npy` — float32 (n_clean, 256) per Room-B capture
+- `derived/manifest.csv` — capture_id, room, activity, split, source_file, n_packets_raw, n_packets_clean, intermediate_path
+- `derived/cleaning_report.csv` — per-capture rejection counts (non_finite, near_zero, consecutive_dup, gain_spike)
+
+Pipeline per capture: pcap read → packed-float decode → amplitude → 4-rule cleaning → save .npy.
+Room B: CSV read → cleaning → save .npy.
+Shape `[1] != 256` causes immediate hard failure. Captures with fewer than `min_valid_packets` after cleaning print a WARNING.
 
 ---
 
-## 6. Build windows
+## 7. Build windows
 
 ```bash
 python scripts/build_windows.py --config configs/experiment.yaml
