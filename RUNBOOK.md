@@ -1,0 +1,200 @@
+# RUNBOOK – CSI-HAR Pipeline
+
+Quick reference for every runnable command in the repository.  
+All commands are run from the **repository root** unless noted.
+
+---
+
+## 0. Environment setup
+
+```bash
+# Create and activate a virtual environment (Python 3.10+)
+python -m venv .venv
+.venv\Scripts\activate          # Windows PowerShell
+# source .venv/bin/activate     # macOS / Linux
+
+# Install pinned dependencies
+pip install -r requirements.txt
+```
+
+---
+
+## 1. Verify config loads cleanly
+
+```bash
+python -c "from src.config import load_config; cfg = load_config('configs/experiment.yaml'); print('config_hash:', cfg.config_hash())"
+```
+
+**Expected output**
+```
+config_hash: <16 hex characters>
+```
+
+---
+
+## 2. Run the full test suite
+
+```bash
+pytest tests/ -v
+```
+
+**Expected output (abridged)**
+```
+tests/test_config.py::TestLoadConfigValid::test_returns_experiment_config PASSED
+tests/test_config.py::TestLoadConfigValid::test_paths_are_path_objects PASSED
+...
+tests/test_manifest.py::TestWriteReadRoundTrip::test_write_then_read_returns_same_data PASSED
+...
+============================= N passed in X.XXs ==============================
+```
+
+All tests must pass with **0 failures** before any PR is merged.
+
+---
+
+## 3. Run tests with coverage
+
+```bash
+pytest tests/ --cov=src --cov-report=term-missing -v
+```
+
+---
+
+## 4. Smoke test (end-to-end on tiny synthetic data, < 30 s)
+
+The smoke flag bypasses real data ingestion and runs every pipeline stage on
+randomly generated arrays that satisfy the `(150, 256) float32` contract.
+
+```bash
+python run_episode.py --smoke
+```
+
+**Expected output**
+```
+[smoke] Generating synthetic data ...
+[smoke] Room A: 10 captures  Room B: 10 captures
+[smoke] Manifest written  -> derived/manifest.csv
+[smoke] Windows written   -> derived/windows/
+[smoke] Task 1 room accuracy  : 1.00  (oracle, synthetic labels)
+[smoke] Task 2 linear probe   : done  (random encoder baseline)
+[smoke] Task 3 few-shot K=1   : done
+[smoke] All smoke checks passed in <30 s
+```
+
+> **Note:** The smoke run writes to `derived/` (gitignored).  
+> Delete `derived/` before running a real pipeline to avoid stale cache.
+
+---
+
+## 5. Build intermediate representations (real data)
+
+```bash
+python scripts/build_intermediate.py --config configs/experiment.yaml
+```
+
+Reads raw PCAP (Room A) and CSV (Room B), cleans them, and writes
+`derived/intermediate/{A,B}/{capture_id}.npy` plus `derived/manifest.csv`.
+
+---
+
+## 6. Build windows
+
+```bash
+python scripts/build_windows.py --config configs/experiment.yaml
+```
+
+Tiles every intermediate capture into `(150, 256)` windows and writes
+`derived/windows/{dev,val}/` and `derived/windows_index.csv`.
+
+---
+
+## 7. Task 1 – Room identification
+
+```bash
+python scripts/baseline_har.py --config configs/experiment.yaml --task room
+```
+
+---
+
+## 8. Task 2 – Self-supervised encoder + linear probe
+
+```bash
+# Pre-train the encoder
+python scripts/task2_eval.py --config configs/experiment.yaml --stage pretrain
+
+# Evaluate frozen encoder with linear probe on validation set
+python scripts/task2_eval.py --config configs/experiment.yaml --stage eval
+```
+
+---
+
+## 9. Task 3 – Cross-room few-shot sweep
+
+```bash
+# Sweep K ∈ {1,5,10,20} for both A→B and B→A
+python scripts/sweep.py --config configs/experiment.yaml
+```
+
+Results are written to `reports/task3_sweep.csv`.
+
+---
+
+## 10. Generate figures
+
+```bash
+python scripts/make_figures.py --config configs/experiment.yaml
+```
+
+Writes PNG files to `reports/figures/`:
+- `label_efficiency_curve.png`
+- `encoder_umap_by_room.png`
+- `encoder_umap_by_activity.png`
+- `room_accuracy_vs_window_length.png`
+- `routing_contribution.png`
+- `confusion_matrix_roomA_K5.png`
+- `confusion_matrix_roomB_K5.png`
+
+---
+
+## 11. Run a single challenge episode (teaching-team reproducibility check)
+
+```bash
+python run_episode.py \
+    --episode_dir <path/to/episode_captures> \
+    --config configs/experiment.yaml \
+    --output reports/episode_predictions.csv
+```
+
+**Output format** (`reports/episode_predictions.csv`)
+```
+window_id,room,label,confidence
+ep_0000,A,fall,0.923
+ep_0001,B,empty,0.871
+...
+```
+
+---
+
+## 12. Inspect raw source files
+
+```bash
+python scripts/inspect_data.py --config configs/experiment.yaml
+```
+
+Prints per-room packet/row counts, subcarrier dimensionality, and a sample
+amplitude histogram without writing any derived files.
+
+---
+
+## Reproducibility checklist
+
+| Step | Command | Deterministic? |
+|------|---------|---------------|
+| Intermediate build | `build_intermediate.py` | Yes (no randomness) |
+| Window build | `build_windows.py` | Yes (deterministic stride) |
+| Val split (Room B) | inside `build_intermediate.py` | Yes (seed 42) |
+| SSL pre-training | `task2_eval.py --stage pretrain` | Yes (global seed 42) |
+| Few-shot sweep | `sweep.py` | Yes (n_seeds=10 fixed seeds) |
+
+All seeds are set in `configs/experiment.yaml` and propagated via
+`src/config.py`.  Never hard-code seeds in scripts.

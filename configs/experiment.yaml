@@ -1,0 +1,183 @@
+# =============================================================================
+# experiment.yaml  –  single source of truth for the CSI-HAR pipeline
+# All paths are relative to the repository root unless noted.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# paths
+# -----------------------------------------------------------------------------
+paths:
+  # Source data (read-only; never committed to git)
+  room_a_pcap_dir:   "dataset/Experiment-2/Experiment-2/realdata/input_data/30ms/csidata"
+  room_a_val_dir:    "dataset/Experiment-2/Experiment-2/realdata/input_data/30ms/csidata/validation"
+  room_b_csv_dir:    "dataset/Experiment-3/Data"
+
+  # Derived artifacts (regeneratable; never committed to git)
+  derived_dir:       "derived"
+  intermediate_dir:  "derived/intermediate"   # intermediate/{A,B}/{capture_id}.npy
+  windows_dir:       "derived/windows"        # windows/{dev|val}/{capture_id}__{start}.npy
+  manifest_csv:      "derived/manifest.csv"
+  windows_index_csv: "derived/windows_index.csv"
+  checkpoints_dir:   "checkpoints"
+  reports_dir:       "reports"
+
+# -----------------------------------------------------------------------------
+# seeds
+# -----------------------------------------------------------------------------
+seeds:
+  global_seed: 42
+  # 10 independent seeds for few-shot support-set sampling
+  fewshot_seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+# -----------------------------------------------------------------------------
+# window
+# -----------------------------------------------------------------------------
+window:
+  length: 150          # official benchmark window size (observations × subcarriers)
+  n_subcarriers: 256   # fixed by hardware platform (BCM4366c0 @ 80 MHz)
+  dev_stride: 50       # stride when tiling development captures into windows
+  val_stride: 150      # non-overlapping windows for validation (stride == length)
+  # What to do when a capture has fewer than `length` valid observations:
+  #   reflect_pad – mirror-pad up to `length` (keeps the capture in the dataset)
+  #   exclude     – drop the capture entirely
+  short_capture_policy: "reflect_pad"
+
+# -----------------------------------------------------------------------------
+# cleaning
+# -----------------------------------------------------------------------------
+cleaning:
+  # Minimum valid (non-NaN, non-zero) packets a capture must have after
+  # per-packet filtering; captures below this threshold are rejected.
+  min_valid_packets: 10
+  # Maximum fraction of NaN/non-finite values allowed in a single packet's
+  # 256-subcarrier vector before that packet is dropped.
+  max_nan_fraction_per_packet: 0.10
+  # Amplitude values above this physical ceiling are clipped (not dropped).
+  amplitude_clip_max: 5000.0
+  # Amplitude values at or below this floor are treated as zero-information
+  # and the entire packet is dropped.
+  amplitude_floor: 0.0
+  # Fraction of subcarriers that may be identically zero across ALL packets
+  # in a capture before the capture is flagged as degenerate.
+  max_zero_subcarrier_fraction: 0.50
+
+# -----------------------------------------------------------------------------
+# normalization
+# NOTE: statistics are ALWAYS fitted on development data only.
+# During validation, the pre-fitted scaler is applied without refitting.
+# -----------------------------------------------------------------------------
+normalization:
+  # zscore      – subtract mean, divide by std  (per-subcarrier, fit on dev)
+  # minmax      – scale each subcarrier to [0, 1] (fit on dev)
+  # robust      – subtract median, divide by IQR  (fit on dev)
+  # per_capture – zscore computed independently for each capture (no leakage)
+  method: "per_capture"
+  # Clip z-scores / scaled values to this symmetric range after normalization
+  # (null = no clipping)
+  clip_after_norm: 10.0
+
+# -----------------------------------------------------------------------------
+# self-supervised learning (Task 2)
+# -----------------------------------------------------------------------------
+ssl:
+  # Architecture for the encoder backbone
+  # cnn1d       – 1-D temporal CNN (fast, good baseline)
+  # transformer – lightweight ViT-style transformer
+  encoder: "cnn1d"
+  # Dimension of the projection head output used during contrastive training
+  projection_dim: 128
+  # Dimension of the representation returned by the frozen encoder
+  embedding_dim: 256
+  # SimCLR-style temperature for NT-Xent loss
+  temperature: 0.07
+  epochs: 50
+  batch_size: 64
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  # Cosine annealing minimum LR
+  lr_min: 1.0e-5
+  # Number of negative samples per anchor in contrastive loss (within-batch)
+  # (set to null to use all other samples in the batch)
+  n_negatives: null
+
+# -----------------------------------------------------------------------------
+# augmentations (used during SSL training; NOT applied at inference)
+# -----------------------------------------------------------------------------
+augment:
+  # Gaussian noise std as a fraction of per-window std
+  gaussian_noise_std: 0.05
+  # Time-axis cropping: randomly keep this fraction of the time axis
+  time_crop_min_frac: 0.70
+  # Randomly zero out this fraction of subcarriers
+  subcarrier_mask_frac: 0.10
+  # Apply amplitude scaling by U[scale_min, scale_max]
+  amplitude_scale_min: 0.80
+  amplitude_scale_max: 1.20
+
+# -----------------------------------------------------------------------------
+# domain alignment (optional; applied between SSL pretraining and fine-tuning)
+# -----------------------------------------------------------------------------
+align:
+  # procrustes – orthogonal Procrustes alignment of per-room embedding centroids
+  # coral      – second-order statistics alignment (CORAL)
+  # none       – skip alignment
+  method: "none"
+
+# -----------------------------------------------------------------------------
+# environment routing (Task 1 → feeds Task 3)
+# -----------------------------------------------------------------------------
+routing:
+  # predicted_hard – use argmax of room classifier; route to one room's model
+  # predicted_soft – weighted combination by room-classifier softmax scores
+  # oracle         – use ground-truth room label (upper bound, for ablation)
+  # none           – skip routing; use a single universal model
+  mode: "predicted_hard"
+  # Minimum room-classifier confidence to commit to hard routing;
+  # below this threshold fall back to "none" behaviour.
+  confidence_threshold: 0.60
+
+# -----------------------------------------------------------------------------
+# few-shot adaptation (Task 3)
+# -----------------------------------------------------------------------------
+fewshot:
+  # K values to sweep (number of labeled target-room development captures
+  # per target-exclusive activity)
+  K_list: [1, 5, 10, 20]
+  # How many independent support-set draws to average over
+  n_seeds: 10
+  # Nearest-centroid metric
+  distance_metric: "cosine"   # cosine | euclidean
+  # Covariance regularisation for LDA / Gaussian classifiers
+  # ledoit_wolf – sklearn LedoitWolf estimator
+  # none        – no regularisation
+  shrinkage: "ledoit_wolf"
+  # Classifier head used for few-shot adaptation
+  # ncm  – nearest-class-mean (pure prototypical)
+  # lda  – linear discriminant analysis
+  classifier: "ncm"
+
+# -----------------------------------------------------------------------------
+# activity and room vocabularies
+# (config.py enforces that manifest values stay within these sets)
+# -----------------------------------------------------------------------------
+activities:
+  # Room A (Experiment-2) activities
+  room_a: ["fall", "sit", "sitdown", "stand", "standup", "walk"]
+  # Room B (Experiment-3) activities
+  room_b: ["empty", "lying", "sit", "stand", "walk"]
+  # Activities shared by both rooms (no target labels needed in Task 3)
+  shared: ["sit", "stand", "walk"]
+  # Target-exclusive activities per room (require K-shot support in Task 3)
+  room_a_exclusive: ["fall", "sitdown", "standup"]
+  room_b_exclusive: ["empty", "lying"]
+  # Union (used to validate manifest entries)
+  all: ["empty", "fall", "lying", "sit", "sitdown", "stand", "standup", "walk"]
+
+rooms:
+  all: ["A", "B"]
+
+splits:
+  all: ["dev", "val"]
+  # Random seed for Experiment-3 validation split (25 captures per activity)
+  val_seed: 42
+  val_captures_per_class: 25
