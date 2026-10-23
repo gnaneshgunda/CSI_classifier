@@ -86,7 +86,47 @@ python run_episode.py --smoke
 
 ---
 
-## 5. Build intermediate representations (real data)
+## 5. Inspect raw source files
+
+```bash
+# Full inspection (reads every pcap + csv; takes several minutes on ~1000 pcaps)
+python scripts/inspect_data.py --config configs/experiment.yaml
+
+# Quick smoke (synthetic data, no real files needed, <5 s)
+python scripts/inspect_data.py --smoke
+```
+
+**Expected output (smoke)**
+```
+[smoke] Generating synthetic inspection data …
+[smoke] Markdown written -> reports\data_notes.md
+════════════════ Room A – Development (synthetic) ════════════════
+  Activity         N   CSI med  CSI min  CSI max  <150  FPS est  Δt med ms
+  ──────────────────────────────────────────────────────────────────────
+  fall             5       254      195      311     0     33.4     29.92
+  ...
+════════════════ Room B – Standard CSV (synthetic) ════════════════
+  ...
+[smoke] inspect_data smoke PASSED ✓
+```
+
+**What the real run produces:**
+- Console tables with per-activity statistics for both rooms
+- `reports/data_notes.md` – Markdown summary with:
+  - PCAP: CSI-candidate packet counts, inter-packet timing, payload-length histogram
+  - CSV: row/column counts, NaN totals, header style classification, amplitude range
+  - Per-activity capture-length summary (both rooms combined)
+  - Flagged anomalous files (0-indexed headers, unexpected naming)
+
+**Key findings from real data (Room B):**
+- All standard files: 500 rows × 256 cols, `Subcarrier_1..256` headers
+- `Walking_{N}.csv` files (209 total): `Subcarrier_1..256` headers except `Walking_0.csv` (0-indexed)
+- 5 anomalous files with 0-indexed headers: `Empty_11.csv`, `Lying_0.csv`, `Sitting_0.csv`,
+  `Standing_0.csv`, `Walking_0.csv` — all 500 rows × 256 cols, data appears valid
+
+---
+
+## 6. Build intermediate representations (real data)
 
 ```bash
 python scripts/build_intermediate.py --config configs/experiment.yaml
