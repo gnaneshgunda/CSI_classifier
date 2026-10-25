@@ -258,11 +258,11 @@ class TestProcessCapture:
 
 class TestBuildIntermediateSmoke:
     def test_smoke_runs_without_error(self) -> None:
-        import subprocess, os
+        import sys, subprocess, os
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
-            ["python", "scripts/build_intermediate.py", "--smoke"],
+            [sys.executable, "scripts/build_intermediate.py", "--smoke"],
             capture_output=True, text=True, encoding="utf-8",
             cwd=str(Path(__file__).parent.parent),
             env=env,

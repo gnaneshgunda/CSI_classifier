@@ -342,10 +342,11 @@ class TestCountWindows:
 
 class TestBuildWindowsSmoke:
     def test_smoke_runs_without_error(self) -> None:
+        import sys
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
-            ["python", "scripts/build_windows.py", "--smoke"],
+            [sys.executable, "scripts/build_windows.py", "--smoke"],
             capture_output=True, text=True, encoding="utf-8",
             cwd=str(Path(__file__).parent.parent),
             env=env,
