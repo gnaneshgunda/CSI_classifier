@@ -14,6 +14,7 @@ Synthetic pcap helpers
 """
 
 from __future__ import annotations
+import sys
 
 import io
 import struct
@@ -469,7 +470,7 @@ class TestCLI:
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
-            ["python", "-m", "src.pcap_reader", str(p)],
+            [sys.executable, "-m", "src.pcap_reader", str(p)],
             capture_output=True, text=True, encoding="utf-8",
             cwd=str(Path(__file__).parent.parent),
             env=env,
@@ -481,7 +482,7 @@ class TestCLI:
     def test_cli_missing_file_exits_nonzero(self, tmp_path: Path) -> None:
         import subprocess
         result = subprocess.run(
-            ["python", "-m", "src.pcap_reader", str(tmp_path / "nope.pcap")],
+            [sys.executable, "-m", "src.pcap_reader", str(tmp_path / "nope.pcap")],
             capture_output=True, text=True,
             cwd=str(Path(__file__).parent.parent),
         )
