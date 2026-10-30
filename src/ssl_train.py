@@ -223,7 +223,7 @@ def make_block_mask(
     total_blocks = n_blocks_t * n_blocks_s
     n_mask = round(mask_ratio * total_blocks)
     if n_mask <= 0:
-        return mask  # ratio=0 → no masking
+        return torch.zeros(B, T, n_sub, dtype=torch.bool, device=device)  # ratio=0 → no masking
 
     mask = torch.zeros(B, T, n_sub, dtype=torch.bool, device=device)
     for b in range(B):
