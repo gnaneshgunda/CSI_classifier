@@ -1,3 +1,4 @@
+
 # RUNBOOK – CSI-HAR Pipeline
 
 Quick reference for every runnable command in the repository.  
@@ -202,22 +203,127 @@ Windows never cross capture boundaries. Each window is traceable via `start` ind
 
 ---
 
-## 7. Task 1 – Room identification
+## 7. Baseline HAR (Hand-crafted features + LR / SVM / RF)
 
 ```bash
-python scripts/baseline_har.py --config configs/experiment.yaml --task room
+# Full evaluation on fixed validation windows (trained on development windows only)
+python scripts/baseline_har.py --config configs/experiment.yaml
+
+# Quick smoke (synthetic data, no real files needed, < 10 s)
+python scripts/baseline_har.py --smoke
 ```
+
+**Expected output (smoke)**
+```
+[smoke] baseline_har smoke test ...
+========================================================================
+Baseline HAR results
+========================================================================
+Experiment   Room        K  Metric                    Value
+------------------------------------------------------------------------
+LR           A          -1  macro_f1                 0.1831
+LR           A          -1  balanced_accuracy        0.2083
+LR           B          -1  macro_f1                 0.2738
+LR           B          -1  balanced_accuracy        0.3000
+LR           joint      -1  macro_f1                 0.2090
+LR           joint      -1  balanced_accuracy        0.2031
+SVM          A          -1  macro_f1                 0.1596
+SVM          A          -1  balanced_accuracy        0.1667
+SVM          B          -1  macro_f1                 0.3177
+SVM          B          -1  balanced_accuracy        0.3500
+SVM          joint      -1  macro_f1                 0.1326
+SVM          joint      -1  balanced_accuracy        0.1875
+RF           A          -1  macro_f1                 0.2966
+RF           A          -1  balanced_accuracy        0.2917
+RF           B          -1  macro_f1                 0.1506
+RF           B          -1  balanced_accuracy        0.1500
+RF           joint      -1  macro_f1                 0.1214
+RF           joint      -1  balanced_accuracy        0.1719
+========================================================================
+[smoke] 18 result rows written  OK
+[smoke] experiments: ['LR', 'RF', 'SVM']  OK
+[smoke] rooms: ['A', 'B', 'joint']  OK
+[smoke] metrics: ['balanced_accuracy', 'macro_f1']  OK
+[smoke] baseline_har PASSED
+```
+
+**What the real run produces:**
+- `reports/baseline_har_results.csv` with schema: `experiment,target_room,K,metric,value`
+  - Experiments: `LR`, `SVM`, `RF`
+  - Rooms: `A`, `B`, `joint`
+  - Metrics: `macro_f1`, `balanced_accuracy`
+  - $K = -1$ (no few-shot sentinel)
 
 ---
 
 ## 8. Task 2 – Self-supervised encoder + linear probe
 
-```bash
-# Pre-train the encoder
-python scripts/task2_eval.py --config configs/experiment.yaml --stage pretrain
+Linear evaluation of representations across five conditions:
+1. `handcrafted` — 524-d hand-crafted features (`src.features`).
+2. `random` — randomly initialised `ResNet1DEncoder` (no pre-training).
+3. `vicreg_aug` — encoder pre-trained with VICReg + augmentations.
+4. `vicreg_noaug` — encoder pre-trained with VICReg (no augmentations).
+5. `masked` — encoder pre-trained with masked auto-encoding.
 
-# Evaluate frozen encoder with linear probe on validation set
-python scripts/task2_eval.py --config configs/experiment.yaml --stage eval
+Embeddings are L2-normalized, standardized with DEVELOPMENT statistics only, and evaluated with a frozen encoder. Logistic Regression is trained on development embeddings and evaluated on validation embeddings across joint and per-room scopes.
+
+### Quick smoke test (< 15 s)
+Runs end-to-end evaluation on synthetic data for `handcrafted` and `random` across joint and per-room scopes without requiring real dataset downloads or pre-trained checkpoints:
+
+```bash
+python scripts/task2_eval.py --smoke
+```
+
+**Expected output (smoke)**
+```
+[smoke] task2_eval smoke test ...
+[smoke] 12 result rows  OK
+[smoke] experiments: ['probe_handcrafted', 'probe_random']  OK
+[smoke] scopes: ['joint', 'per_room']  OK
+[smoke] metrics: ['balanced_accuracy', 'macro_f1']  OK
+[smoke] target_rooms: ['A', 'B', 'joint']  OK
+[smoke] CSV format ['experiment', 'target_room', 'K', 'metric', 'value']  OK
+[smoke] task2_eval PASSED
+```
+
+### Full evaluation
+
+```bash
+# Evaluate all five conditions across both joint and per-room scopes
+python scripts/task2_eval.py --config configs/experiment.yaml --scope both
+
+# Or evaluate specific conditions / scopes
+python scripts/task2_eval.py --config configs/experiment.yaml \
+    --conditions handcrafted random --scope joint
+```
+
+### Optional: Pre-train encoders first
+If pre-trained checkpoints are not yet present in `checkpoints/`:
+
+```bash
+# VICReg with augmentations
+python src/ssl_train.py --config configs/experiment.yaml --mode vicreg --run_name vicreg_aug
+
+# VICReg without augmentations
+python src/ssl_train.py --config configs/experiment.yaml --mode vicreg --run_name vicreg_noaug --no_aug
+
+# Masked auto-encoder
+python src/ssl_train.py --config configs/experiment.yaml --mode masked --run_name masked
+```
+
+### Configuration & Checkpoint Assumptions
+- **Configuration:** `configs/experiment.yaml` must supply `paths.windows_index_csv`, `paths.windows_dir`, `paths.checkpoints_dir`, `paths.reports_dir`, and `seeds.global_seed`.
+- **Windows index:** `derived/windows_index.csv` and `derived/windows/{dev,val}/` must exist (created via `python scripts/build_windows.py`).
+- **Checkpoints:** Conditions `vicreg_aug`, `vicreg_noaug`, and `masked` expect weights at `{checkpoints_dir}/{condition}.pt`. If a checkpoint is absent, `scripts/task2_eval.py` logs a warning and skips that condition while evaluating the available ones.
+- **`handcrafted` and `random`:** Require no checkpoints.
+
+**What the run produces:**
+- `reports/task2_probe_results.csv` with schema: `experiment,target_room,K,metric,value`
+  - Experiments: `probe_handcrafted`, `probe_random`, `probe_vicreg_aug`, `probe_vicreg_noaug`, `probe_masked`
+  - Target rooms: `joint`, `A`, `B`
+  - Metrics: `macro_f1`, `balanced_accuracy`
+  - $K = -1$ (full linear probe sentinel)
+
 ```
 
 ---
