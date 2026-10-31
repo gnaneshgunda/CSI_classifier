@@ -330,6 +330,7 @@ class SSLPairDataset(Dataset):
         self._cfg         = cfg
         self._augment     = augment
         self._seed        = seed
+        self._cache: dict = {}   # window_id -> np.ndarray, populated after pairs built
 
         # ------------------------------------------------------------------ #
         # Build per-capture window lists                                      #
@@ -364,6 +365,17 @@ class SSLPairDataset(Dataset):
                 for j in range(i + 1, n):
                     self._pairs.append((room, win_ids[i], win_ids[j]))
 
+        # ------------------------------------------------------------------ #
+        # Preload all unique windows into RAM once (avoids 57k disk reads/epoch)
+        # 10,662 dev windows × (150×256×4 bytes) ≈ 1.6 GB — fits in RAM easily
+        # ------------------------------------------------------------------ #
+        all_ids = set()
+        for _, wid1, wid2 in self._pairs:
+            all_ids.add(wid1)
+            all_ids.add(wid2)
+        for wid in all_ids:
+            self._cache[wid] = self._load_npy(wid, split="dev")
+
     # ---------------------------------------------------------------------- #
     # Dataset protocol                                                        #
     # ---------------------------------------------------------------------- #
@@ -386,9 +398,9 @@ class SSLPairDataset(Dataset):
         """
         room, wid1, wid2 = self._pairs[idx]
 
-        # Load raw windows
-        raw1 = self._load_npy(wid1, split="dev")
-        raw2 = self._load_npy(wid2, split="dev")
+        # Load from cache (preloaded at construction) instead of disk
+        raw1 = self._cache[wid1].copy()
+        raw2 = self._cache[wid2].copy()
 
         # Normalise (oracle: use capture's true room)
         norm1_static, norm1_dynamic = self._normalizer.transform(raw1, room=room)
