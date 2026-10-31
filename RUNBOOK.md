@@ -203,7 +203,45 @@ Windows never cross capture boundaries. Each window is traceable via `start` ind
 
 ---
 
-## 7. Baseline HAR (Hand-crafted features + LR / SVM / RF)
+## 8. Task 1 – Room classifier (P15)
+
+Trains Logistic Regression (LR) and MLP classifiers on development windows using 512-d spectral-temporal features (`mean` and `std` over time across 256 subcarriers with `log1p` transform). Evaluates accuracy and balanced accuracy on validation windows (headline metric at length 150), sweeps window lengths $\{10, 25, 50, 100, 150\}$, saves results CSV and figure, and exports the trained model with `predict_proba` for routing.
+
+```bash
+# Full evaluation on derived windows (trained on development split only)
+python src/room_model.py --config configs/experiment.yaml
+
+# Quick smoke test (tiny synthetic data in < 30 s)
+python src/room_model.py --smoke
+```
+
+**Expected output (smoke)**
+```
+[smoke] src/room_model.py self-test ...
+[smoke] figure saved  OK
+[smoke] feat shape (512,) float32 finite  OK
+[smoke] batch transform (8, 512)  OK
+[smoke] fit LR + MLP on synthetic data  OK
+[smoke] predict / predict_proba  OK
+[smoke] score_split on val  OK
+[smoke] save / load checkpoint + proba match  OK
+[smoke] window-length study (6 rows)  OK
+[smoke] src/room_model.py PASSED
+```
+
+**What the run produces:**
+- `reports/room_model_results.csv` with schema: `model,split,window_length,metric,value`
+  - Models: `LR`, `MLP`
+  - Splits: `dev`, `val`, `val_length_study`
+  - Metrics: `accuracy`, `balanced_accuracy`
+  - Headline evaluation at `window_length = 150`
+  - Window-length sweep at lengths $L \in \{10, 25, 50, 100, 150\}$
+- `reports/room_window_length.png` — validation accuracy vs window length curve
+- `checkpoints/room_model.pkl` — trained model checkpoint with `predict_proba` method used by `src.routing.RoomRouter`
+
+---
+
+## 9. Baseline HAR (Hand-crafted features + LR / SVM / RF)
 
 ```bash
 # Full evaluation on fixed validation windows (trained on development windows only)

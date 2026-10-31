@@ -84,8 +84,13 @@ from __future__ import annotations
 
 import logging
 import pickle
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
 
@@ -914,11 +919,11 @@ def train_and_evaluate(cfg) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Smoke test
+# CLI & Smoke test
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
-    import sys
+def _run_smoke() -> None:
+    """Run end-to-end self-test on tiny synthetic data in <30 seconds."""
     import tempfile
     import csv as csv_mod
     import numpy as np
@@ -1041,4 +1046,34 @@ if __name__ == "__main__":
     print(f"[smoke] save / load checkpoint + proba match  OK")
     print(f"[smoke] window-length study ({len(length_df)} rows)  OK")
     print("[smoke] src/room_model.py PASSED")
-    sys.exit(0)
+
+
+def main() -> None:
+    """CLI entry point for src/room_model.py."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="P15: Room identification model (Task 1) - train LR & MLP, window-length study, and export model."
+    )
+    parser.add_argument(
+        "--config", default="configs/experiment.yaml",
+        help="Path to experiment.yaml (default: configs/experiment.yaml)",
+    )
+    parser.add_argument(
+        "--smoke", action="store_true",
+        help="Run end-to-end smoke test on tiny synthetic data in under 30 seconds",
+    )
+    args = parser.parse_args()
+
+    if args.smoke:
+        _run_smoke()
+        sys.exit(0)
+    else:
+        from src.config import load_config
+        cfg = load_config(args.config)
+        train_and_evaluate(cfg)
+
+
+if __name__ == "__main__":
+    main()
