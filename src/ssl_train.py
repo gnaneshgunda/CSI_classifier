@@ -321,7 +321,7 @@ def _train_vicreg(
         cfg.ssl.epochs, cfg.ssl.batch_size, cfg.ssl.lr,
     )
 
-    for epoch in range(1, cfg.ssl.epochs + 1):
+    for epoch in range(getattr(args, "start_epoch", 1), cfg.ssl.epochs + 1):
         encoder.train()
         projector.train()
         t0 = time.time()
@@ -439,7 +439,7 @@ def _train_masked(
         args.mask_ratio, cfg.ssl.epochs, cfg.ssl.batch_size, cfg.ssl.lr,
     )
 
-    for epoch in range(1, cfg.ssl.epochs + 1):
+    for epoch in range(getattr(args, "start_epoch", 1), cfg.ssl.epochs + 1):
         encoder.train()
         decoder.train()
         t0 = time.time()
@@ -623,6 +623,9 @@ def _parse_args() -> argparse.Namespace:
     # Checkpointing
     p.add_argument("--ckpt_every", type=int, default=10,
                    help="Save a checkpoint every N epochs (default: 10)")
+    p.add_argument("--resume", type=str, default=None, metavar="CKPT",
+                   help="Path to an epoch checkpoint to resume from "
+                        "(e.g. checkpoints/masked_128_ep0020.pt)")
 
     p.add_argument("--smoke", action="store_true",
                    help="Run smoke test on synthetic data")
@@ -696,6 +699,21 @@ def main() -> None:
     # ---- checkpoint dir ----
     ckpt_dir = Path(cfg.paths.checkpoints_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- resume from checkpoint ----
+    if args.resume:
+        ckpt_path = Path(args.resume)
+        if not ckpt_path.exists():
+            log.error("Resume checkpoint not found: %s", ckpt_path)
+            sys.exit(1)
+        ckpt = torch.load(str(ckpt_path), map_location=device)
+        encoder.load_state_dict(ckpt["encoder"])
+        # Inject start_epoch so training loops can skip already-done epochs
+        args.start_epoch = ckpt.get("epoch", 0) + 1
+        log.info("Resumed from %s  (epoch %d → continuing from %d)",
+                 ckpt_path, ckpt.get("epoch", 0), args.start_epoch)
+    else:
+        args.start_epoch = 1
 
     # ---- train ----
     if args.mode == "vicreg":
