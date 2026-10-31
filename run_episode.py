@@ -171,11 +171,12 @@ def load_router(cfg: ExperimentConfig) -> RoomRouter:
                     rm._is_fit   = True
                     rm.rooms     = payload.get("rooms", ["A", "B"])
                     rm.classes_  = __import__("numpy").array(rm.rooms)
-                    from src.normalization import Normalizer
-                    rm._extractor = __import__("src.room_model", fromlist=["RoomFeatureExtractor"]).RoomFeatureExtractor(
+                    from src.room_model import RoomFeatureExtractor
+                    from pathlib import Path as _Path
+                    _norm_path = _Path(cfg.paths.derived_dir) / "norm_stats.npz"
+                    rm._extractor = RoomFeatureExtractor(
                         log1p=True,
-                        norm_stats_path=__import__("pathlib").Path(cfg.paths.derived_dir) / "norm_stats.npz"
-                        if __import__("pathlib").Path(cfg.paths.derived_dir + "/norm_stats.npz").exists() else None
+                        norm_stats_path=_norm_path if _norm_path.exists() else None
                     )
                     clf = rm
                 else:
