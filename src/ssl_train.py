@@ -353,14 +353,18 @@ def _train_vicreg(
 
             for k, v in terms.items():
                 running[k] += v
-            all_z.append(encoder.encode(view1).detach().cpu())
+            if epoch % 5 == 0:
+                all_z.append(encoder.encode(view1).detach().cpu())
             n_batches += 1
 
         sched.step()
 
         # ---- diagnostics ----
-        z_all  = torch.cat(all_z, dim=0)
-        diag   = embedding_diagnostics(z_all)
+        if all_z:
+            z_all = torch.cat(all_z, dim=0)
+            diag  = embedding_diagnostics(z_all)
+        else:
+            diag  = {"emb_std_mean": float("nan"), "emb_std_min": float("nan"), "eff_rank": float("nan")}
         elapsed = time.time() - t0
         row = {
             "epoch":        epoch,
@@ -470,13 +474,18 @@ def _train_masked(
             scaler.update()
 
             running_recon += float(loss.detach())
-            all_z.append(z.detach().cpu())
+            # Only collect embeddings for diagnostics every 5 epochs to save memory/time
+            if epoch % 5 == 0:
+                all_z.append(z.detach().cpu())
             n_batches += 1
 
         sched.step()
 
-        z_all   = torch.cat(all_z, dim=0)
-        diag    = embedding_diagnostics(z_all)
+        if all_z:
+            z_all = torch.cat(all_z, dim=0)
+            diag  = embedding_diagnostics(z_all)
+        else:
+            diag  = {"emb_std_mean": float("nan"), "emb_std_min": float("nan"), "eff_rank": float("nan")}
         elapsed = time.time() - t0
         row = {
             "epoch":        epoch,
