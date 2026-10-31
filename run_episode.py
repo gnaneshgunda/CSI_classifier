@@ -154,12 +154,32 @@ def load_router(cfg: ExperimentConfig) -> RoomRouter:
     # Try loading pre-trained room classifier
     ckpt_dir = Path(cfg.paths.checkpoints_dir)
     clf = None
-    for clf_name in ("room_model_lr.pkl", "room_model_mlp.pkl"):
+    # room_model.pkl is the canonical name from src/room_model.py RoomModel.save()
+    for clf_name in ("room_model.pkl", "room_model_lr.pkl", "room_model_mlp.pkl"):
         p = ckpt_dir / clf_name
         if p.exists():
             try:
                 import joblib
-                clf = joblib.load(str(p))
+                payload = joblib.load(str(p))
+                # room_model.pkl stores a dict payload; extract the best clf
+                if isinstance(payload, dict) and "clfs" in payload:
+                    from src.room_model import RoomModel
+                    rm = RoomModel.__new__(RoomModel)
+                    rm._clfs     = payload["clfs"]
+                    rm._scalers  = payload["scalers"]
+                    rm.best_name = payload.get("best_name", list(payload["clfs"].keys())[0])
+                    rm._is_fit   = True
+                    rm.rooms     = payload.get("rooms", ["A", "B"])
+                    rm.classes_  = __import__("numpy").array(rm.rooms)
+                    from src.normalization import Normalizer
+                    rm._extractor = __import__("src.room_model", fromlist=["RoomFeatureExtractor"]).RoomFeatureExtractor(
+                        log1p=True,
+                        norm_stats_path=__import__("pathlib").Path(cfg.paths.derived_dir) / "norm_stats.npz"
+                        if __import__("pathlib").Path(cfg.paths.derived_dir + "/norm_stats.npz").exists() else None
+                    )
+                    clf = rm
+                else:
+                    clf = payload
                 log.info("Loaded room classifier from %s", p)
                 break
             except Exception as exc:
@@ -167,7 +187,6 @@ def load_router(cfg: ExperimentConfig) -> RoomRouter:
 
     if clf is None:
         log.warning("No room classifier checkpoint found; falling back to oracle mode for routing.")
-        # Create a modified config with oracle mode to avoid crashing
         from dataclasses import replace
         new_routing = replace(cfg.routing, mode="oracle")
         return RoomRouter(None, replace(cfg, routing=new_routing))
