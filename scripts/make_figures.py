@@ -761,7 +761,7 @@ def make_all_figures(
                 f"Run 'python run_episode.py --target_room {room} --K 5' first."
             )
 
-    log.info("All publication figures successfully generated in %s ✓", out_dir)
+    log.info("All publication figures successfully generated in %s", out_dir)
 
 
 def _make_all_figures_smoke(out_dir: Path, dpi: int = 150) -> None:
@@ -844,7 +844,7 @@ def _make_all_figures_smoke(out_dir: Path, dpi: int = 150) -> None:
                 y_p.append(act if rng.rand() < 0.85 else rng.choice(valid))
         plot_confusion_matrix_with_metrics(y_t, y_p, room, out_dir, K=5, dpi=dpi)
 
-    print("[smoke] make_figures smoke test passed successfully ✓")
+    print("[smoke] make_figures smoke test passed successfully")
 
 
 def main() -> None:

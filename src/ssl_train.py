@@ -257,6 +257,10 @@ def embedding_diagnostics(
     -------
     dict with keys ``emb_std_mean``, ``emb_std_min``, ``eff_rank``.
     """
+    # Cast to float32 — eigvalsh is not implemented for float16 on CPU,
+    # and mixed-precision training may leave embeddings in half precision.
+    z = z.float()
+
     stds = torch.sqrt(z.var(dim=0) + eps)              # (D,)
     z_c  = z - z.mean(dim=0)
     cov  = (z_c.T @ z_c) / max(z.shape[0] - 1, 1)    # (D, D)
@@ -465,7 +469,7 @@ def _train_masked(
             scaler.step(opt)
             scaler.update()
 
-            running_recon += float(loss)
+            running_recon += float(loss.detach())
             all_z.append(z.detach().cpu())
             n_batches += 1
 
@@ -569,7 +573,7 @@ def _run_smoke() -> None:
         # Make sure it loads back
         enc2 = ResNet1DEncoder(embedding_dim=EMB, verbose=False)
         enc2.load_state_dict(sd)
-        print("[smoke] VICReg: encoder weights saved and loadable  ✓")
+        print("[smoke] VICReg: encoder weights saved and loadable")
 
         # Masked
         enc3 = ResNet1DEncoder(embedding_dim=EMB, verbose=False)
@@ -577,14 +581,14 @@ def _run_smoke() -> None:
         _train_masked(enc3, loader, args_masked, cfg, device, ckpt_dir)
         masked_out = ckpt_dir / "smoke_masked.pt"
         assert masked_out.exists(), "Masked encoder weights not saved"
-        print("[smoke] Masked MAE: encoder weights saved  ✓")
+        print("[smoke] Masked MAE: encoder weights saved")
 
         # Check CSV logs exist
         assert (ckpt_dir / "smoke_vicreg_log.csv").exists()
         assert (ckpt_dir / "smoke_masked_log.csv").exists()
-        print("[smoke] CSV logs written  ✓")
+        print("[smoke] CSV logs written")
 
-    print("[smoke] ssl_train smoke PASSED ✓")
+    print("[smoke] ssl_train smoke PASSED")
 
 
 # ---------------------------------------------------------------------------

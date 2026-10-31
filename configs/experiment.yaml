@@ -87,7 +87,7 @@ ssl:
   # Dimension of the projection head output used during contrastive training
   projection_dim: 128
   # Dimension of the representation returned by the frozen encoder
-  embedding_dim: 256
+  embedding_dim: 128
   # SimCLR-style temperature for NT-Xent loss
   temperature: 0.07
   epochs: 50
