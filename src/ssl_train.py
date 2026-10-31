@@ -191,10 +191,10 @@ def vicreg_loss(
 
     total = inv_weight * inv + var_weight * var + cov_weight * cov
     return total, {
-        "inv":  float(inv),
-        "var":  float(var),
-        "cov":  float(cov),
-        "total": float(total),
+        "inv":  float(inv.detach()),
+        "var":  float(var.detach()),
+        "cov":  float(cov.detach()),
+        "total": float(total.detach()),
     }
 
 
