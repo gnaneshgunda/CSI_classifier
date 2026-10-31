@@ -117,12 +117,24 @@ class RoomFeatureExtractor:
     log1p:
         Whether to apply log1p to the raw amplitudes before computing
         mean/std.  Default True (matches normalisation in the SSL pipeline).
+    norm_stats_path:
+        Optional path to ``norm_stats.npz``.  When provided, applies
+        global z-score (log1p → subtract global_mean, divide by global_scale)
+        before computing mean/std features.  This removes the amplitude-scale
+        difference between data collection setups so the classifier operates
+        on a common numerical representation.
     """
 
     DIM: int = 512   # 256 mean + 256 std
 
-    def __init__(self, log1p: bool = True) -> None:
+    def __init__(self, log1p: bool = True, norm_stats_path=None) -> None:
         self.log1p = log1p
+        self._global_mean  = None
+        self._global_scale = None
+        if norm_stats_path is not None:
+            stats = np.load(str(norm_stats_path))
+            self._global_mean  = stats["global_mean"].astype(np.float64)   # (256,)
+            self._global_scale = stats["global_scale"].astype(np.float64)  # (256,)
 
     def transform(self, window: np.ndarray) -> np.ndarray:
         """Extract feature from a single window.
@@ -148,6 +160,8 @@ class RoomFeatureExtractor:
         w = window.astype(np.float64)
         if self.log1p:
             w = np.log1p(np.clip(w, 0.0, None))
+        if self._global_mean is not None:
+            w = (w - self._global_mean) / (self._global_scale + 1e-8)
         mean = w.mean(axis=0).astype(np.float32)   # (256,)
         std  = w.std(axis=0,  ddof=0).astype(np.float32)  # (256,)
         return np.concatenate([mean, std])
@@ -169,6 +183,8 @@ class RoomFeatureExtractor:
         w = windows.astype(np.float64)
         if self.log1p:
             w = np.log1p(np.clip(w, 0.0, None))
+        if self._global_mean is not None:
+            w = (w - self._global_mean) / (self._global_scale + 1e-8)
         mean = w.mean(axis=1).astype(np.float32)   # (N, 256)
         std  = w.std(axis=1,  ddof=0).astype(np.float32)  # (N, 256)
         return np.concatenate([mean, std], axis=1)
@@ -247,8 +263,14 @@ class RoomModel:
     """
 
     def __init__(self, cfg=None, log1p: bool = True) -> None:
-        self.cfg        = cfg
-        self._extractor = RoomFeatureExtractor(log1p=log1p)
+        self.cfg = cfg
+        # Use global norm stats if available so features are on a common scale
+        norm_stats_path = None
+        if cfg is not None:
+            p = Path(cfg.paths.derived_dir) / "norm_stats.npz"
+            if p.exists():
+                norm_stats_path = p
+        self._extractor = RoomFeatureExtractor(log1p=log1p, norm_stats_path=norm_stats_path)
         self._scalers: Dict[str, object]   = {}
         self._clfs:   Dict[str, object]   = {}
         self._is_fit: bool = False
