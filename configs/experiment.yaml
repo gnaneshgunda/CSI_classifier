@@ -121,7 +121,7 @@ align:
   # procrustes – orthogonal Procrustes alignment of per-room embedding centroids
   # coral      – second-order statistics alignment (CORAL)
   # none       – skip alignment
-  method: "none"
+  method: "coral"
 
 # -----------------------------------------------------------------------------
 # environment routing (Task 1 → feeds Task 3)
