@@ -105,14 +105,14 @@ ssl:
 # -----------------------------------------------------------------------------
 augment:
   # Gaussian noise std as a fraction of per-window std
-  gaussian_noise_std: 0.05
+  gaussian_noise_std: 0.15
   # Time-axis cropping: randomly keep this fraction of the time axis
-  time_crop_min_frac: 0.70
+  time_crop_min_frac: 0.50
   # Randomly zero out this fraction of subcarriers
-  subcarrier_mask_frac: 0.10
+  subcarrier_mask_frac: 0.30
   # Apply amplitude scaling by U[scale_min, scale_max]
-  amplitude_scale_min: 0.80
-  amplitude_scale_max: 1.20
+  amplitude_scale_min: 0.60
+  amplitude_scale_max: 1.40
 
 # -----------------------------------------------------------------------------
 # domain alignment (optional; applied between SSL pretraining and fine-tuning)
