@@ -1,0 +1,10 @@
+target,mode,macro_f1
+Overall,none,0.853282
+Room A,oracle,0.819322
+Room A,predicted,0.819322
+Room A,none,0.853282
+Room B,oracle,0.967647
+Room B,predicted,0.967647
+Room B,none,0.853282
+Overall,oracle,0.8934845
+Overall,predicted,0.8934845

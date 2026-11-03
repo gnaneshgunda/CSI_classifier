@@ -1,0 +1,5 @@
+experiment,target_room,K,metric,value
+fewshot_AtoB,B,5,macro_f1,0.188563
+fewshot_AtoB,B,5,balanced_accuracy,0.216000
+fewshot_AtoB,B,5,target_exclusive_macro_f1,0.207051
+fewshot_AtoB,B,5,shared_class_macro_f1,0.176238
