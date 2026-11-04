@@ -91,7 +91,7 @@ ssl:
   # SimCLR-style temperature for NT-Xent loss
   temperature: 0.07
   epochs: 50
-  batch_size: 64
+  batch_size: 256
   lr: 1.0e-3
   weight_decay: 1.0e-4
   # Cosine annealing minimum LR
