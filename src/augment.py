@@ -402,13 +402,17 @@ class SSLPairDataset(Dataset):
         raw1 = self._cache[wid1].copy()
         raw2 = self._cache[wid2].copy()
 
-        # Normalise (oracle: use capture's true room)
-        norm1_static, norm1_dynamic = self._normalizer.transform(raw1, room=room)
-        norm2_static, norm2_dynamic = self._normalizer.transform(raw2, room=room)
+        # Normalise using per-capture z-score (room-agnostic)
+        # This forces the encoder to learn activity patterns rather than
+        # room-specific amplitude patterns, improving cross-room invariance.
+        def _per_capture_norm(x: np.ndarray) -> np.ndarray:
+            x = np.log1p(np.clip(x.astype(np.float64), 0, None))
+            mu  = x.mean()
+            std = x.std() + 1e-8
+            return ((x - mu) / std).astype(np.float32)
 
-        # Reconstruct normalised windows: static (broadcast) + dynamic
-        win1 = norm1_dynamic + norm1_static[np.newaxis, :]   # (T, 256)
-        win2 = norm2_dynamic + norm2_static[np.newaxis, :]
+        win1 = _per_capture_norm(raw1)
+        win2 = _per_capture_norm(raw2)
 
         # Per-item reproducible RNG (different seed per view so views differ)
         rng1 = np.random.default_rng([self._seed, idx, 0])

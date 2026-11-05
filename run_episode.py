@@ -257,18 +257,10 @@ def extract_embeddings_for_df(
         except Exception:
             continue
 
-        # Route and normalize
-        try:
-            route_res = router.route(win.mean(axis=0), true_room=room)
-            norm_static, norm_dynamic = normalizer.transform(
-                win, room=route_res.room, room_probs=route_res.room_probs
-            )
-            norm_win = (norm_dynamic + norm_static[np.newaxis, :]).astype(np.float32)
-        except Exception:
-            # Fallback to direct window standardization if normalizer lacks stats
-            mu = win.mean(axis=0, keepdims=True)
-            std = win.std(axis=0, keepdims=True) + 1e-6
-            norm_win = ((win - mu) / std).astype(np.float32)
+        # Per-capture normalisation — matches SSL training normalisation
+        # log1p then global z-score using the window's own statistics
+        w = np.log1p(np.clip(win.astype(np.float64), 0, None))
+        norm_win = ((w - w.mean()) / (w.std() + 1e-8)).astype(np.float32)
 
         batch_wins.append(torch.from_numpy(norm_win))
         batch_meta.append((wid, cid, act))
