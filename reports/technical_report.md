@@ -282,9 +282,16 @@ for nearly all seeds (encoder embeddings from different rooms are in non-overlap
 With CORAL, shared F1 reaches 0.10–0.21, confirming that second-order statistics alignment
 partially bridges the domain gap.
 
-**Retraining with stronger augmentation improved effective rank** (eff_rank 13→31 for vicreg_aug,
-50→51 for vicreg_noaug) but did not dramatically improve cross-room transfer, suggesting the
-bottleneck is the domain gap itself rather than embedding collapse.
+**Retraining ablation (v2 encoders):** We retrained both VICReg encoders with stronger
+augmentations (Gaussian σ=15%, amplitude scale 0.6-1.4, 30% subcarrier dropout) to address
+the low effective rank (eff_rank≈13) observed in the original runs. The retrained encoders
+achieved higher eff_rank (vicreg_aug_v2: 31, vicreg_noaug_v2: 51). However, cross-room
+shared activity F1 dropped to 0.00 — worse than the original encoders with CORAL (0.10-0.18).
+This counter-intuitive result indicates that higher eff_rank does not imply better
+room-invariance. The stronger augmentation and higher-dimensional embeddings captured more
+room-specific structural variation, making cross-room prototype matching harder. We therefore
+use the original encoders (50 epochs, standard augmentation) with CORAL alignment as our
+primary results.
 
 **K does not consistently help.** Performance does not monotonically increase with K for either
 direction, which is expected — K only controls the exclusive activity prototypes, not the shared
