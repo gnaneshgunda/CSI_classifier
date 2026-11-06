@@ -343,6 +343,7 @@ def _train_vicreg(
                     inv_weight=args.inv_weight,
                     var_weight=args.var_weight,
                     cov_weight=args.cov_weight,
+                    gamma=getattr(args, "var_gamma", 1.0),
                 )
 
             scaler.scale(loss).backward()
@@ -627,6 +628,10 @@ def _parse_args() -> argparse.Namespace:
                    help="VICReg variance weight μ (default: 25)")
     p.add_argument("--cov_weight", type=float, default=1.0,
                    help="VICReg covariance weight ν (default: 1)")
+    p.add_argument("--var_gamma", type=float, default=1.0,
+                   help="VICReg variance hinge target γ (default: 1.0). "
+                        "Raise to 2.0-3.0 to force the variance term to stay active "
+                        "throughout training, improving directional spread of embeddings.")
 
     # Masked mode
     p.add_argument("--mask_ratio", type=float, default=0.5,

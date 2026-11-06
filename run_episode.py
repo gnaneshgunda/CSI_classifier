@@ -393,9 +393,6 @@ def run_episode(
     cids_support = cids_tgt_dev[support_mask]
 
     # 2. Fit classifier: source all labels + K target exclusive labels → LR
-    # This avoids the NCM cosine-collapse problem where all embeddings have
-    # high cosine similarity (~0.97) making the centroid head output uniform probabilities.
-    # LR uses full 128-d geometry, not just direction, so it separates classes better.
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
 
