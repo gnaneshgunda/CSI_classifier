@@ -392,15 +392,25 @@ def run_episode(
     y_support = y_tgt_dev[support_mask]
     cids_support = cids_tgt_dev[support_mask]
 
-    # 2. Fit PrototypeHead
-    head = PrototypeHead(target_room=target_room, cfg=cfg)
-    head.fit(
-        source_embeddings=X_src_dev,
-        source_labels=y_src_dev,
-        target_support_embeddings=X_support,
-        target_support_labels=y_support,
-        target_support_capture_ids=cids_support,
+    # 2. Fit classifier: source all labels + K target exclusive labels → LR
+    # This avoids the NCM cosine-collapse problem where all embeddings have
+    # high cosine similarity (~0.97) making the centroid head output uniform probabilities.
+    # LR uses full 128-d geometry, not just direction, so it separates classes better.
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    X_train = np.vstack([X_src_dev, X_support])
+    y_train = np.concatenate([y_src_dev, y_support])
+
+    scaler_head = StandardScaler()
+    X_train_sc  = scaler_head.fit_transform(X_train)
+
+    lr_head = LogisticRegression(
+        max_iter=1000, C=1.0, random_state=seed, multi_class="multinomial"
     )
+    lr_head.fit(X_train_sc, y_train)
+
+    valid_classes = list(VALID_ACTIVITIES[target_room])
 
     # 3. Predict on target validation windows
     if len(X_tgt_val) == 0:
@@ -409,19 +419,36 @@ def run_episode(
         results_rows = []
         return results_rows, preds_df
 
+    X_tgt_val_sc = scaler_head.transform(X_tgt_val)
+
+    def _predict_lr(X_sc: np.ndarray):
+        """Predict using LR, masking to valid target room classes."""
+        probs_all  = lr_head.predict_proba(X_sc)          # (N, n_train_classes)
+        classes    = lr_head.classes_
+        # Build (N, n_valid) probability matrix restricted to target room classes
+        valid_idx  = [i for i, c in enumerate(classes) if str(c) in set(valid_classes)]
+        if valid_idx:
+            probs_valid = probs_all[:, valid_idx]
+            probs_valid = probs_valid / probs_valid.sum(axis=1, keepdims=True)
+            valid_labels = [str(classes[i]) for i in valid_idx]
+        else:
+            probs_valid  = probs_all
+            valid_labels = [str(c) for c in classes]
+        best_idx   = np.argmax(probs_valid, axis=1)
+        y_pred_out = np.array([valid_labels[i] for i in best_idx], dtype=object)
+        confs_out  = probs_valid[np.arange(len(probs_valid)), best_idx].astype(np.float32)
+        return y_pred_out, confs_out, probs_valid, valid_labels
+
     if capture_avg:
-        # Average predicted probabilities across all sliding windows of each capture
         unique_cids = np.unique(cids_tgt_val)
         cid_predictions: Dict[str, Tuple[str, float]] = {}
 
         for cid in unique_cids:
             mask = cids_tgt_val == cid
-            probs_w = head.predict_proba(X_tgt_val[mask])  # (W, C)
-            mean_probs = np.mean(probs_w, axis=0)          # (C,)
-            best_idx = int(np.argmax(mean_probs))
-            best_label = head.classes_[best_idx]
-            best_conf = float(mean_probs[best_idx])
-            cid_predictions[str(cid)] = (best_label, best_conf)
+            _, _, probs_w, valid_labels = _predict_lr(X_tgt_val_sc[mask])
+            mean_probs = np.mean(probs_w, axis=0)
+            best_idx   = int(np.argmax(mean_probs))
+            cid_predictions[str(cid)] = (valid_labels[best_idx], float(mean_probs[best_idx]))
 
         y_pred_list: List[str] = []
         conf_list: List[float] = []
@@ -431,12 +458,9 @@ def run_episode(
             conf_list.append(cf)
 
         y_pred = np.array(y_pred_list, dtype=object)
-        confs = np.array(conf_list, dtype=np.float32)
+        confs  = np.array(conf_list, dtype=np.float32)
     else:
-        probs = head.predict_proba(X_tgt_val)
-        best_indices = np.argmax(probs, axis=1)
-        confs = np.max(probs, axis=1).astype(np.float32)
-        y_pred = np.array([head.classes_[i] for i in best_indices], dtype=object)
+        y_pred, confs, _, _ = _predict_lr(X_tgt_val_sc)
 
     # Build predictions DataFrame: (window_id, room, label, confidence)
     preds_df = pd.DataFrame({

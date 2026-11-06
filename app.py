@@ -280,10 +280,9 @@ def _predict_activity_lr(
     precomp: dict,
 ) -> tuple[str, float, dict]:
     """Predict activity using per-room logistic regression (Task 2 probe approach).
-    
-    This is the best single-file inference path — trained on same-room dev
-    embeddings, so it doesn't suffer from the cross-room transfer gap.
-    Expected accuracy: ~85-97% depending on room.
+
+    Trained on same-room dev embeddings only — does not suffer from
+    cross-room transfer gap. Expected accuracy: ~85-97% depending on room.
     """
     aligner    = precomp["aligner"]
     clf        = precomp["lr_clfs"][room]
@@ -297,6 +296,84 @@ def _predict_activity_lr(
     label = str(classes[int(np.argmax(probs_arr))])
     conf  = float(np.max(probs_arr))
     class_probs = {str(c): float(p) for c, p in zip(classes, probs_arr)}
+    return label, conf, class_probs
+
+
+def _predict_activity_lr_fewshot(
+    emb: np.ndarray,
+    room: str,
+    K: int,
+    seed: int,
+    precomp: dict,
+    cfg,
+) -> tuple[str, float, dict]:
+    """Predict using LR trained on source-room dev + K target exclusive shots.
+
+    This is spec-compliant: uses all source labels + K target exclusive labels.
+    Shared activities (sit/stand/walk) are covered by source room examples.
+    Exclusive activities (empty/lying for Room B; fall/sitdown/standup for Room A)
+    are covered by K target dev captures.
+
+    This is strictly better than the prototype head because LR learns a proper
+    decision boundary rather than relying on centroid proximity.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from src.fewshot import sample_support, VALID_ACTIVITIES
+
+    aligner     = precomp["aligner"]
+    source_room = "B" if room == "A" else "A"
+
+    # Align query
+    emb_aligned = aligner.transform(emb[np.newaxis], [room])[0]
+
+    # Source dev embeddings (all labels)
+    X_src = precomp[f"X_{source_room}_dev"]
+    y_src = precomp[f"y_{source_room}_dev"]
+
+    # K-shot target exclusive embeddings
+    X_tgt  = precomp[f"X_{room}_dev"]
+    y_tgt  = precomp[f"y_{room}_dev"]
+    cids   = precomp[f"cids_{room}_dev"]
+
+    manifest_rows = precomp["manifest_rows"]
+    support      = sample_support(manifest_rows, target_room=room, K=K, seed=seed)
+    sampled_cids = set(support.capture_ids)
+
+    mask      = np.isin(cids, list(sampled_cids))
+    X_support = X_tgt[mask]
+    y_support = y_tgt[mask]
+
+    # Combine: source all + target K-shot exclusive
+    X_train = np.vstack([X_src, X_support])
+    y_train = np.concatenate([y_src, y_support])
+
+    # Train LR on combined data
+    scaler = StandardScaler()
+    X_sc   = scaler.fit_transform(X_train)
+    # Only predict valid activities for target room
+    valid  = list(VALID_ACTIVITIES[room])
+    clf    = LogisticRegression(max_iter=1000, C=1.0, random_state=seed,
+                                multi_class="multinomial")
+    clf.fit(X_sc, y_train)
+
+    X_query = scaler.transform(emb_aligned[np.newaxis])
+    probs_arr = clf.predict_proba(X_query)[0]
+    classes   = clf.classes_
+
+    # Mask to valid target room activities
+    valid_set = set(valid)
+    filtered  = [(c, p) for c, p in zip(classes, probs_arr) if str(c) in valid_set]
+    if filtered:
+        total = sum(p for _, p in filtered)
+        filtered = [(c, p / total) for c, p in filtered]  # renormalize
+    else:
+        filtered = [(c, p) for c, p in zip(classes, probs_arr)]
+
+    filtered.sort(key=lambda x: -x[1])
+    label       = str(filtered[0][0])
+    conf        = float(filtered[0][1])
+    class_probs = {str(c): float(p) for c, p in filtered}
     return label, conf, class_probs
 
 
@@ -521,21 +598,26 @@ def main():
 
         mode = st.radio(
             "Prediction mode",
-            ["🎯 Same-room LR (best accuracy)", "🔀 Cross-room few-shot (Task 3)"],
-            index=0,
+            [
+                "🎯 Same-room LR (best accuracy)",
+                "🔀 Cross-room LR + K-shot (spec-compliant, better)",
+                "📐 Cross-room prototype + K-shot (Task 3 benchmark)",
+            ],
+            index=1,
             help=(
-                "Same-room LR: logistic regression trained on dev embeddings of the detected room. "
-                "Expected F1 ~85-97%. | "
-                "Cross-room few-shot: prototype head using source room + K target shots. "
-                "Expected F1 ~35% — this is the Task 3 benchmark setting."
+                "Same-room LR: uses target room dev labels — not Task 3 spec. ~85-97% F1.\n\n"
+                "Cross-room LR + K-shot: source room all labels + K target exclusive shots → trains LR. "
+                "Spec-compliant, better than prototype. \n\n"
+                "Cross-room prototype: pure Task 3 benchmark setup. ~35% macro F1."
             ),
         )
-        use_fewshot = "Cross-room" in mode
+        use_lr_fewshot  = "Cross-room LR" in mode
+        use_ncm_fewshot = "prototype" in mode
 
         K = st.slider("K (shots per exclusive activity)", 1, 20, 5,
-                      disabled=not use_fewshot)
+                      disabled=("Same-room" in mode))
         seed = st.number_input("Random seed", min_value=0, max_value=99, value=42,
-                               disabled=not use_fewshot)
+                               disabled=("Same-room" in mode))
 
         st.divider()
         st.markdown("**Model**")
@@ -629,20 +711,28 @@ def main():
         st.error("Dev embeddings unavailable — derived/ folder missing.")
         return
 
-    if not use_fewshot:
-        # ── Same-room LR: best accuracy, no cross-room gap ────────────────
-        with st.spinner("Predicting activity…"):
-            label, conf, class_probs = _predict_activity_lr(emb, room, precomp)
+    if use_lr_fewshot:
+        # Source all labels + K target exclusive → LR (spec-compliant, best result)
+        with st.spinner(f"Training cross-room LR (K={K})…"):
+            label, conf, class_probs = _predict_activity_lr_fewshot(
+                emb, room, K=K, seed=int(seed), precomp=precomp, cfg=cfg
+            )
         _render_activity_result(label, conf, class_probs,
-                                "Step 2 — Predicted Activity (same-room classifier)")
-    else:
-        # ── Cross-room few-shot: Task 3 benchmark mode ────────────────────
+                                f"Step 2 — Predicted Activity (cross-room LR, K={K})")
+    elif use_ncm_fewshot:
+        # Pure Task 3 prototype head
         with st.spinner(f"Running K={K} cross-room few-shot prediction…"):
             label, conf, class_probs = _predict_activity_kshot(
                 emb, room, K=K, seed=int(seed), precomp=precomp, cfg=cfg
             )
         _render_activity_result(label, conf, class_probs,
-                                f"Step 2 — Predicted Activity (cross-room K={K})")
+                                f"Step 2 — Predicted Activity (prototype K={K})")
+    else:
+        # Same-room LR — best accuracy, not cross-room
+        with st.spinner("Predicting activity…"):
+            label, conf, class_probs = _predict_activity_lr(emb, room, precomp)
+        _render_activity_result(label, conf, class_probs,
+                                "Step 2 — Predicted Activity (same-room LR)")
 
     st.divider()
 
