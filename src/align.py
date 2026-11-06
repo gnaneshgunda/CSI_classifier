@@ -170,6 +170,8 @@ class EmbeddingAligner:
         self,
         embeddings: np.ndarray,
         rooms: Sequence[str],
+        labels: Optional[Sequence[str]] = None,
+        shared_only: bool = False,
     ) -> "EmbeddingAligner":
         """Estimate alignment statistics from **dev** embeddings.
 
@@ -179,6 +181,14 @@ class EmbeddingAligner:
             Float32 array ``(N, D)`` — encoder output for all dev windows.
         rooms:
             N room labels (``"A"`` or ``"B"``, case-insensitive).
+        labels:
+            Optional N activity labels.  Required when ``shared_only=True``.
+        shared_only:
+            If ``True``, fit CORAL statistics using only windows whose
+            activity label is in {sit, stand, walk} (the shared activities).
+            This gives a class-conditioned alignment that directly targets
+            the subspace relevant for shared-activity transfer.
+            Ignored when ``method != "coral"``.
 
         Returns
         -------
@@ -208,7 +218,7 @@ class EmbeddingAligner:
             return self
 
         # ------------------------------------------------------------------ #
-        # Per-room means                                                      #
+        # Per-room means (always fitted on all embeddings)                    #
         # ------------------------------------------------------------------ #
         if self._method not in ("recentre", "coral"):
             raise ValueError(
@@ -240,29 +250,60 @@ class EmbeddingAligner:
 
         # ------------------------------------------------------------------ #
         # CORAL: symmetric (inverse) square roots of per-room covariances     #
+        # When shared_only=True, covariances are estimated only from windows  #
+        # whose activity is in the shared set {sit, stand, walk}.  This      #
+        # produces a class-conditioned alignment that directly targets the    #
+        # subspace relevant for cross-room shared-activity transfer.          #
         # ------------------------------------------------------------------ #
         coral_W_A: Optional[np.ndarray]     = None
         coral_W_B_inv: Optional[np.ndarray] = None
 
         if self._method == "coral":
+            _SHARED = {"sit", "stand", "walk"}
+
             for r in _ROOMS:
-                centred = room_emb[r] - room_mean[r][np.newaxis, :]
+                if shared_only and labels is not None:
+                    labels_arr = np.array(labels)
+                    shared_mask = np.isin(labels_arr, list(_SHARED))
+                    room_mask   = rooms_arr == r
+                    fit_mask    = shared_mask & room_mask
+                    n_shared    = int(fit_mask.sum())
+                    if n_shared < _MIN_ROOM_SAMPLES:
+                        log.warning(
+                            "[align] Room %s: only %d shared-activity embeddings for "
+                            "CORAL; falling back to all-activity covariance.",
+                            r, n_shared,
+                        )
+                        fit_emb = room_emb[r]
+                    else:
+                        fit_emb = emb[fit_mask]
+                        log.info(
+                            "[align] Room %s: using %d shared-activity embeddings "
+                            "for CORAL covariance (shared_only=True).",
+                            r, n_shared,
+                        )
+                else:
+                    fit_emb = room_emb[r]
+
+                centred = fit_emb - fit_emb.mean(axis=0)[np.newaxis, :]
                 n_r     = centred.shape[0]
                 cov     = (centred.T @ centred) / max(n_r - 1, 1)
 
                 if r == "A":
                     coral_W_A, _ = _sym_sqrt_and_inv(cov)
                     log.info(
-                        "[align] CORAL W_A computed  D=%d  cond=%.2e",
+                        "[align] CORAL W_A computed  D=%d  cond=%.2e  shared_only=%s",
                         cov.shape[0],
                         float(np.linalg.cond(cov + _CORAL_REG * np.eye(cov.shape[0]))),
+                        shared_only,
                     )
                 else:
                     _, coral_W_B_inv = _sym_sqrt_and_inv(cov)
                     log.info(
-                        "[align] CORAL W_B_inv computed  D=%d  cond=%.2e",
+                        "[align] CORAL W_B_inv computed  D=%d  cond=%.2e  shared_only=%s",
                         cov.shape[0],
                         float(np.linalg.cond(cov + _CORAL_REG * np.eye(cov.shape[0]))),
+                        shared_only,
                     )
 
         self._stats = AlignStats(

@@ -260,15 +260,30 @@ def compose(
 # ---------------------------------------------------------------------------
 
 class SSLPairDataset(Dataset):
-    """Returns two independently-augmented views of the same development capture.
+    """Returns two independently-augmented views for self-supervised learning.
+
+    Two pairing modes are supported, controlled by ``cross_room_frac``:
+
+    **Same-capture pairs** (``cross_room_frac=0.0``, default legacy behaviour):
+        Both views come from different windows of the *same* development
+        capture.  The invariance loss teaches the encoder to ignore intra-
+        capture variation (slight temporal shifts, noise).
+
+    **Cross-room pairs** (``cross_room_frac > 0.0``):
+        A fraction ``cross_room_frac`` of pairs are drawn cross-room — one
+        window from Room A and one from Room B, selected at random with no
+        activity label used.  The invariance loss then pushes the encoder to
+        produce similar embeddings for both rooms, which directly improves
+        cross-room transfer without violating the no-label SSL constraint.
+        The remaining ``1 - cross_room_frac`` fraction are same-capture pairs
+        as before.
 
     Each item ``(view1, view2)`` contains:
 
-    * Two **different** windows from the **same** development capture.
+    * Two windows (same-capture or cross-room depending on pair type).
     * Each window is independently augmented (via ``compose``).
     * Normalisation applied with the capture's TRUE room (oracle routing).
     * No labels returned.
-    * Both rooms (A and B) are mixed together.
 
     Parameters
     ----------
@@ -292,6 +307,11 @@ class SSLPairDataset(Dataset):
     min_windows_per_capture:
         Minimum number of dev windows a capture must have to be included.
         Captures with only 1 window are silently dropped (need ≥ 2 for a pair).
+    cross_room_frac:
+        Fraction of pairs that should be cross-room (one window from Room A,
+        one from Room B).  Must be in [0.0, 1.0].  Default 0.0 gives the
+        original same-capture-only behaviour.  A value of 0.5 means half the
+        pairs are cross-room, half are same-capture.
 
     Raises
     ------
@@ -311,6 +331,7 @@ class SSLPairDataset(Dataset):
         augment: bool = True,
         seed: int = 0,
         min_windows_per_capture: int = 2,
+        cross_room_frac: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -325,12 +346,18 @@ class SSLPairDataset(Dataset):
                     "rows. Only dev windows may be used for SSL pre-training."
                 )
 
-        self._windows_dir = Path(windows_dir)
-        self._normalizer  = normalizer
-        self._cfg         = cfg
-        self._augment     = augment
-        self._seed        = seed
-        self._cache: dict = {}   # window_id -> np.ndarray, populated after pairs built
+        if not 0.0 <= cross_room_frac <= 1.0:
+            raise ValueError(
+                f"cross_room_frac must be in [0.0, 1.0], got {cross_room_frac}"
+            )
+
+        self._windows_dir    = Path(windows_dir)
+        self._normalizer     = normalizer
+        self._cfg            = cfg
+        self._augment        = augment
+        self._seed           = seed
+        self._cross_room_frac = float(cross_room_frac)
+        self._cache: dict    = {}   # window_id -> np.ndarray, populated after pairs built
 
         # ------------------------------------------------------------------ #
         # Build per-capture window lists                                      #
@@ -353,38 +380,93 @@ class SSLPairDataset(Dataset):
             )
 
         # ------------------------------------------------------------------ #
-        # Pre-build the pair index for __len__ / __getitem__                 #
-        # Each capture contributes C(n,2) pairs; we pre-compute all of them  #
-        # for a clean, indexable dataset.                                     #
+        # Pre-build same-capture pair index                                   #
+        # Each capture contributes C(n,2) pairs.                             #
+        # pairs: list of (room_a, window_id_a, room_b, window_id_b)          #
+        # For same-capture pairs room_a == room_b.                           #
         # ------------------------------------------------------------------ #
-        # pairs: list of (room, window_id_a, window_id_b)
-        self._pairs: List[Tuple[str, str, str]] = []
+        same_pairs: List[Tuple[str, str, str, str]] = []
         for room, win_ids in self._captures:
             n = len(win_ids)
             for i in range(n):
                 for j in range(i + 1, n):
-                    self._pairs.append((room, win_ids[i], win_ids[j]))
+                    same_pairs.append((room, win_ids[i], room, win_ids[j]))
 
         # ------------------------------------------------------------------ #
-        # Preload all unique windows into RAM once (avoids 57k disk reads/epoch)
-        # 10,662 dev windows × (150×256×4 bytes) ≈ 1.6 GB — fits in RAM easily
+        # Build cross-room pairs (no labels used)                             #
+        # Strategy: for each same-capture pair we may want to replace, pick  #
+        # a random window from the *other* room.  We pre-build a flat list   #
+        # of all windows per room so cross-room sampling is O(1).            #
         # ------------------------------------------------------------------ #
-        all_ids = set()
-        for _, wid1, wid2 in self._pairs:
+        # Flat per-room window lists for cross-room sampling
+        self._room_windows: Dict[str, List[str]] = {"A": [], "B": []}
+        for room, win_ids in self._captures:
+            r = room.upper()
+            if r in self._room_windows:
+                self._room_windows[r].extend(win_ids)
+
+        cross_pairs: List[Tuple[str, str, str, str]] = []
+        if cross_room_frac > 0.0:
+            rng_build = np.random.default_rng([seed, 999])
+            n_cross = int(round(len(same_pairs) * cross_room_frac))
+            wins_A = self._room_windows["A"]
+            wins_B = self._room_windows["B"]
+            if not wins_A or not wins_B:
+                warnings.warn(
+                    "cross_room_frac > 0 but one room has no dev windows. "
+                    "Falling back to same-capture pairs only.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            else:
+                idxA = rng_build.integers(0, len(wins_A), size=n_cross)
+                idxB = rng_build.integers(0, len(wins_B), size=n_cross)
+                for ia, ib in zip(idxA, idxB):
+                    cross_pairs.append(("A", wins_A[ia], "B", wins_B[ib]))
+
+        # Mix: keep (1 - frac) of same-capture pairs + all cross-room pairs
+        if cross_room_frac > 0.0 and same_pairs:
+            rng_mix = np.random.default_rng([seed, 998])
+            n_keep = len(same_pairs) - int(round(len(same_pairs) * cross_room_frac))
+            n_keep = max(0, n_keep)
+            keep_idx = rng_mix.choice(len(same_pairs), size=n_keep, replace=False)
+            kept_same = [same_pairs[i] for i in sorted(keep_idx)]
+        else:
+            kept_same = same_pairs
+
+        self._pairs: List[Tuple[str, str, str, str]] = kept_same + cross_pairs
+
+        import random as _random
+        _random.seed(seed)
+        _random.shuffle(self._pairs)
+
+        # ------------------------------------------------------------------ #
+        # Preload all unique windows into RAM once                            #
+        # ------------------------------------------------------------------ #
+        all_ids: set = set()
+        for ra, wid1, rb, wid2 in self._pairs:
             all_ids.add(wid1)
             all_ids.add(wid2)
         for wid in all_ids:
             self._cache[wid] = self._load_npy(wid, split="dev")
 
-    # ---------------------------------------------------------------------- #
-    # Dataset protocol                                                        #
-    # ---------------------------------------------------------------------- #
+        n_cross_actual = sum(1 for ra, _, rb, _ in self._pairs if ra != rb)
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "SSLPairDataset: %d total pairs  (%d same-capture, %d cross-room)  "
+            "cross_room_frac=%.2f",
+            len(self._pairs), len(self._pairs) - n_cross_actual,
+            n_cross_actual, cross_room_frac,
+        )
 
     def __len__(self) -> int:
         return len(self._pairs)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return ``(view1, view2)`` — two independently augmented windows.
+
+        For same-capture pairs both views come from the same room/capture.
+        For cross-room pairs view1 is from Room A and view2 from Room B.
 
         Parameters
         ----------
@@ -396,23 +478,15 @@ class SSLPairDataset(Dataset):
         view1, view2 : torch.Tensor
             Shape ``(T, 256)``, dtype ``float32``.
         """
-        room, wid1, wid2 = self._pairs[idx]
+        room1, wid1, room2, wid2 = self._pairs[idx]
 
         # Load from cache (preloaded at construction) instead of disk
         raw1 = self._cache[wid1].copy()
         raw2 = self._cache[wid2].copy()
 
-        # Normalise using per-capture z-score (room-agnostic)
-        # This forces the encoder to learn activity patterns rather than
-        # room-specific amplitude patterns, improving cross-room invariance.
-        def _per_capture_norm(x: np.ndarray) -> np.ndarray:
-            x = np.log1p(np.clip(x.astype(np.float64), 0, None))
-            mu  = x.mean()
-            std = x.std() + 1e-8
-            return ((x - mu) / std).astype(np.float32)
-
-        win1 = _per_capture_norm(raw1)
-        win2 = _per_capture_norm(raw2)
+        # Normalise each view with its own room's statistics
+        win1 = self._normalizer.transform(raw1[np.newaxis], room=room1)[0]
+        win2 = self._normalizer.transform(raw2[np.newaxis], room=room2)[0]
 
         # Per-item reproducible RNG (different seed per view so views differ)
         rng1 = np.random.default_rng([self._seed, idx, 0])
@@ -440,8 +514,8 @@ class SSLPairDataset(Dataset):
         return np.load(str(path)).astype(np.float32)
 
     @property
-    def pairs(self) -> List[Tuple[str, str, str]]:
-        """List of ``(room, window_id_1, window_id_2)`` pairs."""
+    def pairs(self) -> List[Tuple[str, str, str, str]]:
+        """List of ``(room_1, window_id_1, room_2, window_id_2)`` pairs."""
         return list(self._pairs)
 
     @property

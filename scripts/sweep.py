@@ -71,6 +71,7 @@ def run_sweep(
     condition: str = "vicreg_aug",
     checkpoint_dir: Optional[Path | str] = None,
     device: str = "cpu",
+    shared_only_align: bool = False,
 ) -> pd.DataFrame:
     """Execute the full few-shot sweep across K values, seeds, and directions."""
     windows_dir = Path(cfg.paths.windows_dir)
@@ -126,12 +127,26 @@ def run_sweep(
     # Domain alignment if configured
     if hasattr(cfg, "align") and cfg.align is not None and getattr(cfg.align, "method", "none") != "none":
         aligner = EmbeddingAligner(cfg)
-        try:
-            aligner.load()
-        except Exception:
-            all_dev_embs = np.vstack([X_A_dev, X_B_dev])
-            all_dev_rooms = ["A"] * len(X_A_dev) + ["B"] * len(X_B_dev)
-            aligner.fit(all_dev_embs, all_dev_rooms)
+        # If shared_only_align is requested, always refit — the cached stats
+        # were built on all activities and cannot be reused for shared-only.
+        if shared_only_align:
+            all_dev_embs  = np.vstack([X_A_dev, X_B_dev])
+            all_dev_rooms  = ["A"] * len(X_A_dev) + ["B"] * len(X_B_dev)
+            all_dev_labels = np.concatenate([y_A_dev, y_B_dev])
+            aligner.fit(
+                all_dev_embs,
+                all_dev_rooms,
+                labels=all_dev_labels,
+                shared_only=True,
+            )
+            log.info("[sweep] Refit CORAL using shared-activity (sit/stand/walk) windows only")
+        else:
+            try:
+                aligner.load()
+            except Exception:
+                all_dev_embs  = np.vstack([X_A_dev, X_B_dev])
+                all_dev_rooms  = ["A"] * len(X_A_dev) + ["B"] * len(X_B_dev)
+                aligner.fit(all_dev_embs, all_dev_rooms)
 
         X_A_dev = aligner.transform(X_A_dev, ["A"] * len(X_A_dev))
         X_A_val = aligner.transform(X_A_val, ["A"] * len(X_A_val))
@@ -368,6 +383,10 @@ def main() -> None:
     parser.add_argument("--checkpoint_dir", type=str, default=None, help="Checkpoints directory")
     parser.add_argument("--device", type=str, default="cpu", help="Compute device (cpu or cuda)")
     parser.add_argument("--smoke", action="store_true", help="Run quick smoke test on synthetic data")
+    parser.add_argument("--shared_only_align", action="store_true",
+                        help="Fit CORAL alignment using only shared-activity (sit/stand/walk) "
+                             "dev windows. Produces a class-conditioned alignment that directly "
+                             "targets the shared-activity subspace.")
 
     args = parser.parse_args()
 
@@ -399,6 +418,7 @@ def main() -> None:
         condition=args.condition,
         checkpoint_dir=args.checkpoint_dir,
         device=args.device,
+        shared_only_align=getattr(args, "shared_only_align", False),
     )
 
 

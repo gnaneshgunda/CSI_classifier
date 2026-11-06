@@ -616,6 +616,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Name for checkpoints and logs")
     p.add_argument("--no_aug",   action="store_true",
                    help="Disable augmentation (use raw windows)")
+    p.add_argument("--cross_room_frac", type=float, default=0.0,
+                   help="Fraction of SSL pairs that are cross-room (0.0=same-capture only, "
+                        "0.5=half cross-room). Improves cross-room invariance without labels.")
 
     # VICReg loss weights
     p.add_argument("--inv_weight", type=float, default=25.0,
@@ -680,6 +683,7 @@ def main() -> None:
         cfg=cfg,
         augment=not args.no_aug,
         seed=cfg.seeds.global_seed,
+        cross_room_frac=getattr(args, "cross_room_frac", 0.0),
     )
     log.info("SSL pairs: %d  (augment=%s)", len(dataset), not args.no_aug)
 

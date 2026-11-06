@@ -1,0 +1,21 @@
+name: csi-har
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - numpy==2.1.3
+    - scipy==1.14.1
+    - pandas==2.2.3
+    - scikit-learn==1.6.1
+    - torch==2.6.0
+    - pyyaml==6.0.2
+    - scapy==2.6.1
+    - matplotlib==3.9.2
+    - umap-learn==0.5.7
+    - tqdm==4.67.1
+    - pytest==8.3.4
+    - pytest-cov==6.0.0

@@ -633,7 +633,7 @@ def main() -> None:
     parser.add_argument("--out", "--output", type=str, default=None, help="Output path for results rows")
     parser.add_argument("--predictions_out", "--pred_out", type=str, default=None, help="Output path for predictions CSV")
     parser.add_argument("--capture_avg", action="store_true", help="Average probabilities over windows per capture")
-    parser.add_argument("--condition", type=str, default="vicreg_aug", help="Encoder condition")
+    parser.add_argument("--condition", type=str, default="vicreg_aug_v4", help="Encoder condition")
     parser.add_argument("--checkpoint_dir", type=str, default=None, help="Checkpoint directory")
     parser.add_argument("--device", type=str, default="cpu", help="Compute device (cpu or cuda)")
     parser.add_argument("--episode_dir", type=str, default=None, help="Optional challenge episode directory")
