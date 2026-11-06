@@ -62,6 +62,9 @@ from src.metrics import compute_all_metrics
 from src.normalization import Normalizer
 from src.routing import RoomRouter
 
+# Module-level flag for shared-only CORAL alignment
+_SHARED_ONLY_ALIGN: bool = False
+
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
     datefmt="%H:%M:%S",
@@ -372,7 +375,7 @@ def run_episode(
         if getattr(cfg, "align", None) is not None and getattr(cfg.align, "method", "none") != "none":
             aligner = EmbeddingAligner(cfg)
             # If shared_only_align is requested, always refit on shared-activity windows
-            if getattr(cfg, "_shared_only_align", False):
+            if _SHARED_ONLY_ALIGN:
                 all_dev_embs = np.vstack([X_src_dev, X_tgt_dev])
                 all_dev_rooms = [source_room] * len(X_src_dev) + [target_room] * len(X_tgt_dev)
                 all_dev_labels = np.concatenate([y_src_dev, y_tgt_dev])
@@ -677,9 +680,9 @@ def main() -> None:
         return
 
     cfg = load_config(args.config)
-    # Pass shared_only_align flag through cfg
-    if args.shared_only_align:
-        setattr(cfg, "_shared_only_align", True)
+    # Pass shared_only_align flag through a module-level variable
+    import run_episode as _re
+    _re._SHARED_ONLY_ALIGN = args.shared_only_align
 
     # Derive default output paths if not explicitly given
     out_path = args.out
