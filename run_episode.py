@@ -371,12 +371,20 @@ def run_episode(
         # Domain alignment if configured
         if getattr(cfg, "align", None) is not None and getattr(cfg.align, "method", "none") != "none":
             aligner = EmbeddingAligner(cfg)
-            try:
-                aligner.load()
-            except Exception:
+            # If shared_only_align is requested, always refit on shared-activity windows
+            if getattr(cfg, "_shared_only_align", False):
                 all_dev_embs = np.vstack([X_src_dev, X_tgt_dev])
                 all_dev_rooms = [source_room] * len(X_src_dev) + [target_room] * len(X_tgt_dev)
-                aligner.fit(all_dev_embs, all_dev_rooms)
+                all_dev_labels = np.concatenate([y_src_dev, y_tgt_dev])
+                aligner.fit(all_dev_embs, all_dev_rooms, labels=all_dev_labels, shared_only=True)
+                log.info("Refit CORAL using shared-activity windows only")
+            else:
+                try:
+                    aligner.load()
+                except Exception:
+                    all_dev_embs = np.vstack([X_src_dev, X_tgt_dev])
+                    all_dev_rooms = [source_room] * len(X_src_dev) + [target_room] * len(X_tgt_dev)
+                    aligner.fit(all_dev_embs, all_dev_rooms)
 
             X_src_dev = aligner.transform(X_src_dev, [source_room] * len(X_src_dev))
             X_tgt_dev = aligner.transform(X_tgt_dev, [target_room] * len(X_tgt_dev))
@@ -658,6 +666,8 @@ def main() -> None:
     parser.add_argument("--checkpoint_dir", type=str, default=None, help="Checkpoint directory")
     parser.add_argument("--device", type=str, default="cpu", help="Compute device (cpu or cuda)")
     parser.add_argument("--episode_dir", type=str, default=None, help="Optional challenge episode directory")
+    parser.add_argument("--shared_only_align", action="store_true",
+                        help="Fit CORAL using only shared-activity (sit/stand/walk) dev windows")
     parser.add_argument("--smoke", action="store_true", help="Run smoke test on synthetic data")
 
     args = parser.parse_args()
@@ -667,6 +677,9 @@ def main() -> None:
         return
 
     cfg = load_config(args.config)
+    # Pass shared_only_align flag through cfg
+    if args.shared_only_align:
+        setattr(cfg, "_shared_only_align", True)
 
     # Derive default output paths if not explicitly given
     out_path = args.out
