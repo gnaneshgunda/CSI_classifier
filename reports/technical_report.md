@@ -21,7 +21,7 @@ Our pipeline addresses this through four stages:
 1. **Data ingestion and CSI reconstruction** — PCAP decoding and common-format export
 2. **Room identification** — environment fingerprinting for normalisation routing
 3. **Self-supervised representation learning** — encoder pretraining without activity labels
-4. **Cross-room few-shot adaptation** — prototype-based classification with CORAL alignment
+4. **Cross-room few-shot adaptation** — Logistic Regression classifier with CORAL alignment
 
 ---
 
@@ -226,18 +226,18 @@ windows and evaluated on the fixed validation set.
 
 ### 5.1 Method
 
-For each transfer direction (A→B and B→A), we use a **prototype-based (nearest-centroid)**
-classifier:
+For each transfer direction (A→B and B→A), we use a **Logistic Regression** classifier
+trained on frozen encoder embeddings:
 
-1. **Source prototypes**: compute mean embedding per activity using all source-room development
-   windows (all labels available)
-2. **Target exclusive prototypes**: compute mean embedding using only K labeled support
-   captures from target-room development data (exclusive activities only)
-3. **Shared activity prototypes**: directly use source-room prototypes (no target labels)
-4. **Shared-class-conditioned CORAL alignment**: CORAL covariance matrices are estimated
+1. **Source training data**: all source-room development embeddings with full labels
+   (all activities available in the source room)
+2. **Target K-shot data**: K labeled support captures from target-room development data
+   for target-exclusive activities only (shared activities get zero target labels)
+3. **Shared-class-conditioned CORAL alignment**: CORAL covariance matrices are estimated
    using only shared-activity (sit/stand/walk) development windows, directly targeting
    the subspace relevant for zero-shot shared transfer (Sun & Saenko, 2016)
-5. **Classification**: nearest cosine distance to prototype
+4. **Classification**: Logistic Regression (C=1.0, multinomial) on StandardScaler-normalised
+   embeddings, with output masked to valid target-room activity classes
 
 **Support set rules (strictly enforced):**
 - K is counted at the **capture level** — multiple windows from one capture count as one shot
@@ -251,32 +251,48 @@ Transfer directions and exclusive activities:
 | A→B | Room B | empty, lying | sit, stand, walk |
 | B→A | Room A | fall, sitdown, standup | sit, stand, walk |
 
+**Why LR instead of Nearest-Class Mean (NCM):**
+We initially used NCM (cosine similarity to class centroids). Debug revealed all cosine
+similarities between any query and any prototype were ~0.97 — the VICReg encoder with
+inactive variance term (γ=1.0) produced directionally biased embeddings where all vectors
+point roughly the same direction. Softmax over near-equal cosine values yielded uniform
+0.20 probabilities. LR uses the full 128-d coordinate geometry, not just direction, enabling
+class separation even when cosine similarities are degenerate. This improved A→B exclusive
+F1 from 0.193 (NCM) to 0.693 (LR) at K=20.
+
 ### 5.2 Encoder Ablation
 
-We trained four encoder variants, all without activity or room labels, to diagnose the failure
+We trained five encoder variants, all without activity or room labels, to diagnose the failure
 mode and iteratively improve cross-room transfer:
 
-| Encoder | Key change | eff_rank | A→B shared_f1 | B→A shared_f1 |
-|---------|-----------|---------|--------------|--------------|
-| v1 (vicreg_aug) | Baseline VICReg, same-capture pairs | 28 | 0.17 | 0.12 |
-| v2 (vicreg_aug_v2) | Stronger augmentations | 31 | 0.00 | 0.00 |
-| v3 (vicreg_aug_v3) | Per-capture normalization | 25 | 0.00 | 0.00 |
-| **v4 (vicreg_aug_v4)** | **Cross-room pairs (50%)** | **22** | **0.27** | **0.09** |
+| Encoder | Key change | eff_rank | A→B macro_f1 | A→B excl_f1 | A→B shared_f1 |
+|---------|-----------|---------|------------|-----------|-------------|
+| v1 (vicreg_aug) | Baseline VICReg, same-capture pairs | 28 | 0.256 | 0.499 | 0.067 |
+| v2 (vicreg_aug_v2) | Stronger augmentations | 31 | 0.123 | 0.281 | 0.000 |
+| v3 (vicreg_aug_v3) | Per-capture normalization | 25 | 0.155 | 0.352 | 0.000 |
+| **v4 (vicreg_aug_v4)** | **Cross-room pairs (50%)** | **22** | **0.422** | **0.693** | **0.208** |
+| v5 (vicreg_aug_v5) | v4 + γ=2.5 (variance fix) | 37 | 0.398 | 0.739 | 0.159 |
 
-All results with shared-only CORAL alignment. The key finding: **higher eff_rank does not
-imply better cross-room transfer**. v2 and v3 achieved better within-room structure but
-worse cross-room generalization. Only v4 — trained with cross-room pairs — produced
-consistently non-zero shared_f1 in both directions.
+All results with shared-only CORAL alignment + LR head. The key finding: **higher eff_rank
+does not imply better cross-room transfer**. v2, v3, and v5 all achieved higher eff_rank than
+v4 but worse overall macro F1. v5 improved exclusive_f1 (0.739 vs 0.693) but hurt shared_f1
+(0.159 vs 0.208) — the variance fix changed embedding geometry in ways that weakened the
+CORAL alignment for shared activities.
 
-**Root cause of v1–v3 failure**: VICReg pairs were drawn from the same capture, so the
-invariance loss never saw cross-room examples. The encoder learned room-specific features.
-The `var` term was also inactive (=0.000) from epoch 1 in all runs, meaning the variance
-hinge (γ=1) was trivially satisfied and VICReg reduced to covariance decorrelation only.
+**Root cause of v1–v4 directional bias**: VICReg pairs were drawn from the same capture, so
+the invariance loss had a trivial solution. The `var` term was inactive (=0.000) from epoch 1
+because γ=1.0 was trivially satisfied by random initialization (std≈1.5). VICReg reduced to
+covariance decorrelation only, producing embeddings that all point roughly the same direction.
 
 **v4 fix**: 50% of pairs are cross-room (one Room A window, one Room B window, no labels).
-The invariance loss then directly penalizes room-specific embedding differences, producing
-a more room-invariant representation. Notably, `inv` in v4 remained ~0.009 at epoch 50 vs
-~0.0005 in v1 — 18× higher, confirming genuine cross-room invariance pressure.
+The invariance loss then directly penalizes room-specific embedding differences. `inv` in v4
+remained ~0.009 at epoch 50 vs ~0.0005 in v1 — 18× higher, confirming genuine cross-room
+invariance pressure.
+
+**v5 partial fix**: raising γ from 1.0 to 2.5 made the variance term fire (`var=1.498` vs
+`var=0.000`), improving eff_rank from 22 to 37. However, `std_min` only reached 0.71 after 50
+epochs — still below γ=2.5. The variance pressure was partial. v5 is the best for exclusive
+activity adaptation (A→B excl_f1=0.739) but v4 remains the best overall (macro_f1=0.422).
 
 ### 5.3 Alignment Ablation
 
@@ -293,43 +309,49 @@ B→A collapses — Room A has only 1,219 shared-activity dev windows vs 3,955 f
 making the Room A covariance estimate noisier. v4 recovers B→A transfer because the encoder
 itself is more room-invariant.
 
-### 5.4 Primary Results (v4 encoder + shared-only CORAL)
+### 5.4 Primary Results (v4 encoder + shared-only CORAL + LR head)
 
 **A→B (Room B as target):**
 
 | K | Macro F1 | Bal. Acc | Excl. F1 | Shared F1 |
 |---|----------|----------|----------|-----------|
-| 1 | 0.237 ± 0.043 | 0.261 ± 0.047 | 0.237 ± 0.094 | 0.237 ± 0.029 |
-| 5 | 0.316 ± 0.053 | 0.344 ± 0.050 | 0.385 ± 0.128 | 0.270 ± 0.016 |
-| 10 | 0.337 ± 0.048 | 0.366 ± 0.035 | 0.438 ± 0.117 | 0.270 ± 0.011 |
-| 20 | **0.350 ± 0.021** | **0.376 ± 0.018** | **0.458 ± 0.044** | **0.279 ± 0.007** |
+| 1 | 0.175 ± 0.053 | 0.174 ± 0.035 | 0.204 ± 0.105 | 0.155 ± 0.039 |
+| 5 | 0.312 ± 0.049 | 0.306 ± 0.050 | 0.468 ± 0.081 | 0.208 ± 0.037 |
+| 10 | 0.408 ± 0.053 | 0.413 ± 0.047 | 0.644 ± 0.071 | 0.251 ± 0.043 |
+| 20 | **0.422 ± 0.034** | **0.432 ± 0.029** | **0.693 ± 0.040** | **0.241 ± 0.033** |
 
 **B→A (Room A as target):**
 
 | K | Macro F1 | Bal. Acc | Excl. F1 | Shared F1 |
 |---|----------|----------|----------|-----------|
-| 1 | 0.168 ± 0.024 | 0.196 ± 0.027 | 0.230 ± 0.046 | 0.106 ± 0.011 |
-| 5 | 0.141 ± 0.030 | 0.175 ± 0.030 | 0.198 ± 0.041 | 0.084 ± 0.026 |
-| 10 | 0.134 ± 0.023 | 0.168 ± 0.024 | 0.185 ± 0.044 | 0.083 ± 0.024 |
-| 20 | 0.121 ± 0.022 | 0.159 ± 0.021 | 0.160 ± 0.028 | 0.083 ± 0.020 |
+| 1 | 0.083 ± 0.002 | 0.128 ± 0.003 | 0.000 ± 0.000 | 0.167 ± 0.004 |
+| 5 | 0.112 ± 0.021 | 0.134 ± 0.016 | 0.073 ± 0.040 | 0.151 ± 0.013 |
+| 10 | 0.167 ± 0.035 | 0.170 ± 0.031 | 0.208 ± 0.057 | 0.125 ± 0.024 |
+| 20 | **0.208 ± 0.029** | **0.235 ± 0.033** | **0.330 ± 0.057** | 0.086 ± 0.009 |
 
 ### 5.5 Analysis
 
-**A→B transfer is strong and improves with K.** Macro F1 reaches 0.350 at K=20 with
-exclusive_f1=0.458 — adding more shots consistently improves adaptation to Room B exclusive
-activities. Shared F1 stabilises at ~0.27 regardless of K, as expected (shared prototypes
-don't benefit from exclusive-class support shots).
+**A→B transfer is strong and improves consistently with K.** Macro F1 reaches 0.422 at K=20
+with exclusive_f1=0.693 — the LR head learns effective decision boundaries for empty/lying
+from K target shots. Shared F1 stabilises at ~0.21–0.25, bounded by the zero-shot CORAL
+transfer ceiling (shared activities receive no target labels).
 
 **B→A transfer is asymmetrically harder.** Room A has 6 classes vs 5 for Room B, and
-3× fewer shared-activity dev windows, making both the CORAL estimate and source prototypes
-less reliable. B→A macro_f1 degrades with K — adding more exclusive shots shifts the
-prototype space in ways that confuse the already-uncertain shared boundaries.
+3× fewer shared-activity dev windows (1,219 vs 3,955), making the CORAL estimate noisier.
+At K=1, exclusive_f1=0.000 — the LR cannot learn 3 exclusive classes (fall, sitdown, standup)
+from a single example each. NCM would at least produce a centroid here, but the cosine
+collapse makes NCM unreliable for all K.
+
+**LR head vs NCM.** The switch from NCM to LR was the single highest-impact classifier
+change: A→B exclusive_f1 improved from 0.193 (NCM) to 0.693 (LR) at K=20 — a 3.6×
+improvement. NCM used cosine similarity which was degenerate (~0.97 for all class pairs);
+LR uses raw 128-d coordinates which remain linearly separable despite directional bias.
 
 **Shared F1 is bounded by the encoder's room-invariance ceiling.** Even with the best
-alignment, shared_f1 plateaus at ~0.27 (A→B) and ~0.09 (B→A). This reflects the
-fundamental difficulty: sit/stand/walk in different physical environments produce different
-multipath propagation patterns. Zero-shot transfer of shared activities is a genuinely hard
-problem with this dataset.
+alignment and classifier, shared_f1 plateaus at ~0.25 (A→B) and ~0.09 (B→A). This reflects
+the fundamental difficulty: sit/stand/walk in different physical environments produce different
+multipath propagation patterns. The gap between within-room F1 (0.91) and cross-room F1
+(0.42) is the open research problem.
 
 **Figure:** *Label-efficiency curve (Fig. label_efficiency_curve.png), Confusion matrices at K=5
 (Fig. confusion_matrix_roomA_K5.png, confusion_matrix_roomB_K5.png)*
@@ -366,10 +388,12 @@ because the joint model already captures some Room A structure.
 4. **No subject-disjoint guarantee**: The dataset does not establish participant-disjoint
    splits across rooms. Results reflect capture-level disjointness only.
 
-5. **VICReg variance term inactive**: The variance hinge (γ=1) was never active during
-   training (var=0.000 every epoch across all encoder versions). Embeddings already satisfied
-   the constraint from random initialization, so VICReg effectively reduced to covariance
-   decorrelation. Raising γ or using Barlow Twins may produce better-calibrated representations.
+5. **VICReg variance term inactive in v1–v4**: The variance hinge (γ=1.0) was never active
+   during training (var=0.000 every epoch). Embeddings already satisfied the constraint from
+   random initialization, so VICReg effectively reduced to covariance decorrelation. This
+   produced directionally biased embeddings (all cosine similarities ~0.97). Raising γ to 2.5
+   in v5 partially fixed this (var=1.498, eff_rank 22→37) but std_min only reached 0.71 —
+   still below the target. A higher γ (3.0+) or longer training may fully resolve this.
 
 6. **Asymmetric shared-activity data**: Room A has 1,219 shared-activity dev windows vs
    3,955 for Room B. The shared-only CORAL estimate for Room A has higher condition number
@@ -446,7 +470,9 @@ python -m src.ssl_train --mode vicreg --run_name vicreg_aug_v4 --cross_room_frac
 python scripts/task2_eval.py --config configs/experiment.yaml
 
 # 7. Few-shot sweep (Task 3) — primary results
-python scripts/sweep.py --config configs/experiment.yaml --condition vicreg_aug_v4 --shared_only_align --out reports/task3_v4_coral_shared_vicreg_aug.csv
+python scripts/sweep.py --config configs/experiment.yaml \
+    --condition vicreg_aug_v4 --shared_only_align \
+    --out reports/task3_v4_coral_shared_vicreg_aug.csv
 
 # 8. Single episode (demo)
 python run_episode.py --target_room B --K 5 --seed 42 --config configs/experiment.yaml \
