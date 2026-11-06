@@ -52,6 +52,7 @@ wandb/
 *.pth
 # Allow the primary submission checkpoint
 !checkpoints/vicreg_aug_v4.pt
+!checkpoints/vicreg_aug_v5.pt
 
 # -----------------------------------------------------------------------------
 # Reports / figures
@@ -60,7 +61,6 @@ wandb/
 # -----------------------------------------------------------------------------
 reports/episode_*.csv
 reports/predictions_*.csv
-reports/task3_*.csv
 reports/baseline_*.csv
 reports/room_model_*.csv
 reports/routing_*.csv
