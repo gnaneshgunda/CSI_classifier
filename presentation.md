@@ -19,24 +19,24 @@
   — VICReg (contrastive) and Masked Auto-Encoding
 
 - **4. Cross-Room Few-Shot Adaptation (Task 3)**
-  — Logistic regression head trained on source room + K target shots
+  — Logistic regression head: source all labels + K target exclusive shots
   — Shared-class-conditioned CORAL domain alignment
-  — Zero target labels for shared activities (sit / stand / walk)
+  — Shared activities (sit/stand/walk) transferred with **zero** target labels
 
 ---
 
 ## Step 1: PCAP Decoding & Data Ingestion
 
 **Room A — raw PCAP (Nexmon BCM4366c0 @ 80 MHz)**
-- Parse UDP payloads with `scapy`; filter by port 5500, magic bytes `0x1111`, payload 1042 B
+- Parse UDP payloads with `scapy`; filter by port 5500, magic bytes `0x1111`
 - Decode packed 32-bit little-endian integers → 256 complex subcarriers
 - Compute amplitude: `|z| = sqrt(re² + im²)` → `(N_packets, 256)` float32
 
 **Room B — pre-extracted amplitude CSV**
 - Direct `pandas` read; rename columns to `subcarrier_001…256`
-- Handle two header formats (0-indexed in 5 anomalous files)
+- Handle two header formats (5 anomalous files with 0-indexed headers)
 
-**Output:** one `.npy` file per capture in `derived/intermediate/{A,B}/`
+**Output:** one `.npy` per capture in `derived/intermediate/{A,B}/`
 
 **Code:** `src/pcap_reader.py`, `src/csi_decode.py`, `src/room_b_loader.py`
 
@@ -48,15 +48,15 @@ Four sequential rules — each row that fails is dropped, never interpolated:
 
 | Rule | Condition | Reason |
 |------|-----------|--------|
-| Non-finite | > 10% NaN/Inf per packet | Hardware corruption |
+| Non-finite | >10% NaN/Inf per packet | Hardware corruption |
 | Near-zero energy | sum(amp²) ≤ 0 | Dead / silent packet |
-| Consecutive duplicate | bit-for-bit identical to previous | Firmware stutter |
-| Gain spike | robust z-score > 6σ | AGC transient |
+| Consecutive duplicate | Bit-for-bit identical to previous | Firmware stutter |
+| Gain spike | Robust z-score > 6σ | AGC transient |
 
-Entire captures with < 10 clean packets are rejected.  
-Amplitude values > 5000 are **clipped**, not dropped (preserves temporal structure).
+Entire captures with < 10 clean packets are rejected.
+Amplitude values > 5000 are **clipped** (preserves temporal structure).
 
-**Output:** cleaned `.npy` + `derived/cleaning_report.csv`  
+**Output:** cleaned `.npy` + `derived/cleaning_report.csv`
 **Code:** `src/cleaning.py`
 
 ---
@@ -70,7 +70,7 @@ Amplitude values > 5000 are **clipped**, not dropped (preserves temporal structu
 | Development | Sliding windows, stride = 50 | Multiple (maximises training data) |
 | Validation | Single canonical window (central crop; reflect-pad if short) | Exactly 1 |
 
-**Critical rule:** the original capture is the **atomic unit** — all windows from one capture stay in the same split. No cross-capture windows. No leakage.
+**Critical rule:** original capture = atomic unit. All windows from one capture stay in the same split. No cross-capture windows. No leakage.
 
 **Dataset totals:** 10,937 windows — 10,662 dev + 275 val (150 Room A + 125 Room B)
 
@@ -80,45 +80,43 @@ Amplitude values > 5000 are **clipped**, not dropped (preserves temporal structu
 
 ## Step 4: Normalization
 
-Per-window log1p z-score — applied identically to dev and val, no fitting:
+Per-window log1p z-score — no fitting, no leakage:
 
 ```python
-w = np.log1p(np.clip(window, 0, None))   # log-compress amplitude
-norm = (w - w.mean()) / (w.std() + 1e-8) # global per-window z-score
+w = np.log1p(np.clip(window, 0, None))    # log-compress amplitude
+norm = (w - w.mean()) / (w.std() + 1e-8)  # per-window z-score
 ```
 
-**Why per-window (not per-room):**
-- Different gain states across captures need local normalisation
-- No room statistics required — no risk of val leakage
-- Matches the normalisation used inside the SSL training loop exactly
+**Why per-window:**
+- Different gain states across captures require local normalization
+- No room statistics needed → no val leakage risk
+- Exactly matches the normalization used inside the encoder inference path
 
-Room-specific statistics are also fitted on dev data (for Task 1 routing) but the encoder inference path uses per-window z-score throughout.
-
-**Code:** `src/normalization.py`, `scripts/fit_normalization.py`
+**Code:** `src/normalization.py`
 
 ---
 
 ## Step 5: Room Classifier — Task 1
 
-**Features:** 512-d handcrafted vector
+**512-d handcrafted features:**
 ```
-mean over time → (256,)  +  std over time → (256,)  → log1p → z-score
+per-subcarrier mean over time → (256,)
+per-subcarrier std  over time → (256,)
+→ log1p → z-score → (512,)
 ```
 
-**Classifiers trained on development windows only:**
-- Logistic Regression (`C=1.0`, `lbfgs`, 5-fold `GroupKFold`)
-- MLP `[512 → 256 → 128 → 2]` with ReLU + early stopping
-
-**Result:**
+**Two classifiers trained on dev windows only (GroupKFold, no leakage):**
+- Logistic Regression — `C=1.0`, `lbfgs`
+- MLP — `[512 → 256 → 128 → 2]`, ReLU, early stopping
 
 | Model | Val Accuracy | Bal. Accuracy |
 |-------|-------------|--------------|
-| LR | **100.0%** | **100.0%** |
+| LR  | **100.0%** | **100.0%** |
 | MLP | **100.0%** | **100.0%** |
 
-Perfect separation at all window lengths T ∈ {10, 25, 50, 100, 150}.
+Perfect separation at **all** window lengths T ∈ {10, 25, 50, 100, 150}.
 
-**Saved as `checkpoints/room_model.pkl`** — used for routing in Tasks 2 & 3.
+Saved as `checkpoints/room_model.pkl` — used for routing in Tasks 2 & 3.
 
 **Code:** `src/room_model.py`
 
@@ -129,78 +127,63 @@ Perfect separation at all window lengths T ∈ {10, 25, 50, 100, 150}.
 **ResNet1D-Lite** — 321K parameters, input `(B, 150, 256)` → output `(B, 128)`
 
 ```
-Stem:   Conv1d(256→64, k=7) + GroupNorm + GELU
+Stem:    Conv1d(256→64, k=7) + GroupNorm + GELU
 Block 1: ResBlock1D(64→64,   dilation=1, stride=1)
-Block 2: ResBlock1D(64→128,  dilation=2, stride=2)   ← downsample
+Block 2: ResBlock1D(64→128,  dilation=2, stride=2)  ← downsample
 Block 3: ResBlock1D(128→128, dilation=4, stride=1)
-Pool:   Attentive pooling (learned per-timestep weights)
-Proj:   Linear(128→128)
+Pool:    Attentive pooling (learned per-timestep weights)
+Proj:    Linear(128→128)
 ```
 
-**Design choices:**
-- 1D convolutions: subcarriers as channels, time as the signal axis
+**Design rationale:**
+- 1D convolutions: subcarriers as channels, time as signal axis
 - Dilated convolutions: multi-scale temporal pattern capture
 - GroupNorm: stable without large batches
-- Attentive pooling: length-agnostic, learned temporal fusion
+- Attentive pooling: length-agnostic, weighted temporal fusion
 
 **Code:** `src/encoder.py`
 
 ---
 
-## Step 7: SSL Training Iterations
+## Step 7: SSL Training — VICReg
 
-### Iteration 1 — VICReg weak augmentations
-Gaussian σ=0.05, mask 10%, scale 0.80–1.20
-**Problem:** `var=0` every epoch — variance hinge trivially satisfied from init, encoder never learns invariance.
+**VICReg loss (Bardes et al., ICLR 2022):**
+```
+L = λ·Invariance + μ·Variance + ν·Covariance
+    MSE between    Hinge: std ≥ γ   Off-diagonal
+    two views      per dimension    covariance → 0
+```
 
-### Iteration 2 — VICReg stronger augmentations (vicreg_aug / v1)
-Gaussian σ=0.15, mask 30%, scale 0.60–1.40, time crop 0.50
-**Fix:** variance collapse gone; `std_min=2.7` by ep50, `eff_rank≈28`
+**Key insight — the γ problem:**
+- γ=1.0 (default): PyTorch init already gives std≈1.5 → `relu(1.0-1.5)=0`
+- **Variance term was ZERO from epoch 1 across all v1–v4 runs**
+- Encoder only trained via covariance decorrelation → directional bias
 
-### Iteration 3 — VICReg no augmentations (vicreg_noaug)
-Ablation: does augmentation help? Two different windows from same capture as positives.
-`eff_rank=51` — more diverse but still room-specific.
+**v5 fix: γ=2.5**
+- `relu(2.5-1.5)=1.0` → variance loss fires from epoch 1
+- `var=1.498` throughout training vs `var=0.000` before
+- `eff_rank` improved: 22 (v4) → 37 (v5)
 
-### Iteration 4 — Masked Auto-Encoding (masked_128)
-50% block masking, 2-layer CNN decoder, MSE on masked positions only.
-Best within-room probe: Room B F1 = **0.968**
-
-### Iteration 5 — Cross-room pairs + γ fix (vicreg_aug_v4)
-50% of SSL pairs are cross-room (Room A window ↔ Room B window, no labels).  
-Invariance loss `inv=0.009` at ep50 vs `0.0005` before — 18× more cross-room pressure.
-
-### Iteration 6 — Raised γ from 1.0 → 2.5 (vicreg_aug_v5, ongoing)
-`var=1.498` at epoch 1 (previously always 0.000). Variance term finally firing.
+**Code:** `src/ssl_train.py`
 
 ---
 
-## Step 8: VICReg Loss — What Actually Happened
+## Step 8: SSL Training — Cross-Room Pairs (v4)
 
-VICReg loss has three terms:
-```
-L = λ·Invariance + μ·Variance + ν·Covariance
-    (25)             (25)          (1)
-```
+**Original problem:** all SSL pairs were same-capture windows.
+The invariance loss had a trivial solution — two similar windows from the same recording are easy to match. The encoder learned **capture-specific features**, not activity features.
 
-**Variance term:** `relu(γ - std(z))` — hinge loss, fires only when `std < γ`
+**Fix (v4):** 50% of SSL pairs are cross-room — one Room A window + one Room B window, **no labels used**.
 
-**The γ=1.0 problem:**
 ```
-PyTorch default init → std ≈ 1.5–2.0
-relu(1.0 - 1.5) = relu(-0.5) = 0   ← zero gradient from epoch 1
+inv at ep50:  v1 = 0.0005  →  v4 = 0.009  (18× higher)
 ```
 
-The encoder received **no gradient from variance throughout all of v1–v4**.  
-VICReg reduced to covariance decorrelation only → directional bias in embeddings.
+The invariance loss now has to work across rooms. The only consistent strategy for the encoder is to suppress room-specific features (which vary between all A/B pairs) and preserve whatever is consistent — activity-correlated patterns.
 
-**The γ=2.5 fix (v5):**
-```
-relu(2.5 - 1.5) = relu(1.0) = 1.0  ← non-zero, encoder must push std above 2.5
-```
+**This is spec-compliant:** no activity labels are used in pairing. Room membership (from `windows_index.csv`) is structural metadata, not a label.
 
-**Effect on Task 3:** with all embeddings pointing in the same direction, cosine  
-similarity between any two was ~0.97 → NCM (nearest-centroid) output uniform  
-probabilities → we switched to Logistic Regression which uses raw coordinates.
+**Code:** `src/augment.py` — `SSLPairDataset(cross_room_frac=0.5)`
 
 ---
 
@@ -217,9 +200,9 @@ Freeze encoder → train Logistic Regression on dev embeddings → evaluate on v
 | **Masked MAE** | **0.853** | **0.819** | **0.968** |
 
 **Key findings:**
-- Random encoder (0.873 joint) outperforms VICReg+aug (0.700) — the architecture itself has strong inductive bias; augmentation hurt more than it helped
-- Masked MAE best per-room F1 — reconstruction forces learning of CSI structure
-- All SSL encoders outperform handcrafted on **joint** evaluation — cross-room, SSL wins
+- Random encoder (0.873) > VICReg+aug (0.700): architecture has strong inductive bias; strong augmentation hurt
+- Masked MAE best per-room: reconstruction forces structural CSI learning
+- All SSL encoders beat handcrafted on **joint** evaluation — cross-room, SSL wins
 
 **Code:** `scripts/task2_eval.py`
 
@@ -227,18 +210,17 @@ Freeze encoder → train Logistic Regression on dev embeddings → evaluate on v
 
 ## Step 10: CORAL Domain Alignment
 
-Without alignment: dev embeddings from Room A and Room B live in **non-overlapping regions** → shared F1 = 0.000.
+Without alignment: Room A and Room B embeddings live in **non-overlapping regions** → Shared F1 = 0.000.
 
 **CORAL (Sun & Saenko, 2016):** align second-order statistics
 ```
-z_B' = (z_B − μ_B) @ Σ_B^{-½} @ Σ_A^{½}
+z_B' = (z_B − μ_B) @ Σ_B^{-½} @ Σ_A^{½} − μ_global
 ```
-Whitens Room B (zero mean, identity covariance) then re-colours to match Room A.
+Whitens Room B then re-colours to match Room A covariance.
 
-**Key improvement — shared-class-conditioned CORAL:**  
-Instead of fitting on all dev embeddings, fit covariance matrices using only  
-shared-activity windows (sit/stand/walk). Directly targets the subspace that  
-matters for zero-shot shared transfer.
+**Key improvement — shared-class-conditioned CORAL:**
+Fit covariance matrices using **only shared-activity windows** (sit/stand/walk).
+Targets the subspace that matters for zero-shot transfer, not the full distribution.
 
 | Alignment | A→B shared_f1 | B→A shared_f1 |
 |-----------|-------------|-------------|
@@ -246,7 +228,7 @@ matters for zero-shot shared transfer.
 | Global CORAL | 0.161 | 0.097 |
 | **Shared-only CORAL** | **0.279** | **0.106** |
 
-Implemented with eigen-decomposition + regularisation (ε=1e-5 on diagonal) for numerical stability.
+Implemented with eigen-decomposition + regularisation (ε=1e-5) for numerical stability.
 
 **Code:** `src/align.py`
 
@@ -254,103 +236,95 @@ Implemented with eigen-decomposition + regularisation (ε=1e-5 on diagonal) for 
 
 ## Step 11: Few-Shot Classification Head — Task 3
 
-### The Setup
-- **Source room** provides all labeled dev embeddings (no restriction)
-- **Target room** provides only K labeled captures for **exclusive** activities
-- **Shared activities** (sit/stand/walk) get **zero** target labels — must transfer
+### Why not Nearest-Class Mean (NCM)?
 
-### What we tried: NCM (Nearest Class Mean)
-Build one prototype per class = mean embedding. Classify by cosine distance.
+Debug revealed: all cosine similarities between any embedding and any prototype ≈ **0.97**.
+Softmax over near-equal values → uniform 0.20 probabilities for all 5 classes.
 
-**Problem:** All cosine similarities were ~0.97 regardless of class.  
-Softmax → uniform 0.20 probabilities. NCM completely failed.
+**Root cause:** VICReg with inactive variance term (γ=1.0) produces directionally biased embeddings — all vectors point roughly the same direction even though their exact 128-d coordinates differ.
 
-### What we use: Logistic Regression head
+### Logistic Regression head
+
 ```
 X_train = [all source dev embeddings] + [K-shot target exclusive embeddings]
 y_train = [source labels]             + [target exclusive labels]
 → StandardScaler → LogisticRegression(C=1.0, max_iter=1000)
-→ Predict target validation windows
-→ Mask output to valid target-room classes
+→ Predict target validation windows (masked to valid target room classes)
 ```
 
-**Why LR works when NCM fails:** LR uses raw 128-d coordinates, not just direction.  
-Even with high cosine similarity, coordinate patterns differ enough per class for  
-a linear boundary to separate them (proven by Task 2: LR gets 0.91 F1).
+**Why LR works when NCM fails:**
+- NCM uses cosine similarity (direction only) → all ~0.97 → uniform output
+- LR uses full 128-d coordinates → learns linear boundary in the 128-d space
+- Proven feasible by Task 2: LR on same-room embeddings = 0.91 F1
 
-**Code:** `src/fewshot.py`, `run_episode.py`, `scripts/sweep.py`
+**Code:** `run_episode.py`, `scripts/sweep.py`
 
 ---
 
 ## Task 3 Results — A→B (Room B as target)
 
-Source: Room A (all labels) | Target: Room B (K-shot empty, lying only)
+Source: Room A (all dev labels) | Target: Room B (K-shot empty + lying only)
 
 | K | Macro F1 | Bal. Acc | Excl. F1 | Shared F1 |
 |---|----------|---------|---------|---------|
-| 1 | 0.175 ± 0.053 | 0.174 ± 0.058 | 0.204 ± 0.105 | 0.155 ± 0.039 |
-| 5 | 0.312 ± 0.050 | 0.306 ± 0.050 | 0.468 ± 0.081 | 0.208 ± 0.037 |
-| 10 | 0.409 ± 0.053 | 0.413 ± 0.047 | 0.644 ± 0.071 | 0.252 ± 0.043 |
-| 20 | **0.422 ± 0.034** | **0.432 ± 0.029** | **0.693 ± 0.041** | **0.241 ± 0.033** |
+| 1 | 0.175 ± 0.053 | 0.174 ± 0.035 | 0.204 ± 0.105 | 0.155 ± 0.039 |
+| 5 | 0.312 ± 0.049 | 0.306 ± 0.050 | 0.468 ± 0.081 | 0.208 ± 0.037 |
+| 10 | 0.408 ± 0.053 | 0.413 ± 0.047 | 0.644 ± 0.071 | 0.251 ± 0.043 |
+| **20** | **0.422 ± 0.034** | **0.432 ± 0.029** | **0.693 ± 0.040** | **0.241 ± 0.033** |
 
-**Exclusive_f1 at K=20 = 0.693** — the LR correctly learns empty/lying from K shots.  
-**Shared_f1 plateaus ~0.21–0.25** — zero-shot transfer via CORAL is the ceiling.
+**Exclusive_f1 at K=20 = 0.693** — LR successfully learns empty/lying from K shots.
+**Shared_f1 plateaus ~0.21–0.25** — zero-shot CORAL transfer is the ceiling.
 
 ---
 
 ## Task 3 Results — B→A (Room A as target)
 
-Source: Room B (all labels) | Target: Room A (K-shot fall, sitdown, standup only)
+Source: Room B (all dev labels) | Target: Room A (K-shot fall + sitdown + standup only)
 
 | K | Macro F1 | Bal. Acc | Excl. F1 | Shared F1 |
 |---|----------|---------|---------|---------|
-| 1 | 0.083 ± 0.002 | 0.128 ± 0.003 | **0.000** ± 0.000 | 0.167 ± 0.004 |
-| 5 | 0.112 ± 0.021 | 0.134 ± 0.016 | 0.073 ± 0.040 | 0.152 ± 0.013 |
+| 1 | 0.083 ± 0.002 | 0.128 ± 0.003 | 0.000 ± 0.000 | 0.167 ± 0.004 |
+| 5 | 0.112 ± 0.021 | 0.134 ± 0.016 | 0.073 ± 0.040 | 0.151 ± 0.013 |
 | 10 | 0.167 ± 0.035 | 0.170 ± 0.031 | 0.208 ± 0.057 | 0.125 ± 0.024 |
-| 20 | **0.208 ± 0.029** | **0.235 ± 0.033** | **0.330 ± 0.057** | 0.086 ± 0.010 |
+| **20** | **0.208 ± 0.029** | **0.235 ± 0.033** | **0.330 ± 0.057** | 0.086 ± 0.009 |
 
-**B→A is harder:** Room A has 3× fewer shared-activity dev windows (1,219 vs 3,955)  
-→ noisier CORAL estimate. K=1 excl_f1=0.000 — LR can't learn 3 classes from 1 example each.
+**B→A harder than A→B:**
+- Room A has 3× fewer shared-activity dev windows (1,219 vs 3,955) → noisier CORAL
+- 3 exclusive classes vs 2 — LR needs more shots per class to learn boundaries
+- K=1 excl_f1=0.000 — LR cannot learn 3 classes from 1 example each (NCM at least has a centroid here)
 
 ---
 
-## Ablation: What Each Fix Contributed
+## Task 3: What Each Fix Contributed
 
-| Change | A→B macro_f1 | A→B excl_f1 | A→B shared_f1 |
-|--------|------------|-----------|-------------|
-| Baseline (no alignment) | 0.256 | 0.499 | 0.067 |
+| Change | A→B macro K=20 | A→B excl K=20 | A→B shared K=5 |
+|--------|--------------|-------------|--------------|
+| No alignment (baseline) | 0.256 | 0.499 | 0.067 |
 | + Global CORAL | 0.176 | 0.193 | 0.161 |
 | + Shared-only CORAL | 0.296 | 0.350 | **0.279** |
 | + v4 encoder (cross-room pairs) | 0.350 | 0.458 | 0.279 |
-| **+ LR head (final)** | **0.422** | **0.693** | 0.241 |
+| **+ LR head (final)** | **0.422** | **0.693** | 0.208 |
 
-Each change targeted a specific diagnosed problem:
-1. Global CORAL → brought shared_f1 from 0 to 0.16
-2. Shared-only CORAL → focused alignment on the subspace that matters
-3. Cross-room pairs → encoder learns room-invariant features (inv 18× higher)
-4. LR head → bypasses cosine collapse in NCM, uses full 128-d geometry
+Each change targeted a diagnosed failure:
+1. **Global CORAL** → brought shared_f1 from 0 to 0.161
+2. **Shared-only CORAL** → fit on the relevant subspace (+73% shared_f1)
+3. **Cross-room pairs** → encoder learns room-invariant features (inv 18× higher)
+4. **LR head** → bypasses cosine collapse in NCM, uses full 128-d geometry
 
 ---
 
-## Task 3: Key Analysis
+## Encoder Version Comparison
 
-**✗ Shared Activity Transfer is the Bottleneck**
-- Shared F1 plateaus at 0.21–0.28 regardless of K
-- K only adds exclusive-activity shots; shared has zero target labels
-- Encoder embeddings for sit/stand/walk differ across rooms
+| Encoder | Key change | eff_rank | A→B macro K=20 | A→B excl K=20 |
+|---------|-----------|---------|--------------|-------------|
+| v1 (vicreg_aug) | Baseline VICReg, same-capture | 28 | 0.350 | 0.458 |
+| v2 | Stronger augmentation | 31 | 0.123 | 0.281 |
+| v3 | Per-capture norm | 25 | 0.155 | 0.352 |
+| **v4** | **Cross-room pairs** | **22** | **0.422** | **0.693** |
+| v5 | γ=2.5, cross-room | 37 | 0.398 | 0.739 |
 
-**✓ LR Head Dramatically Improves Exclusive Transfer**
-- A→B excl_f1: 0.193 (NCM) → **0.693** (LR) at K=20 — 3.6× improvement
-- LR uses raw 128-d coordinates; NCM only uses direction (cosine)
-
-**✓ Shared-Only CORAL Is Critical**
-- Global CORAL: shared_f1 = 0.161
-- Shared-only CORAL: shared_f1 = **0.279** (+73%)
-- Fitting on shared-activity subspace targets what matters
-
-**📉 K Helps Exclusive but Not Shared**
-- Exclusive F1 grows consistently with K (more examples for LR to learn from)
-- Shared F1 stays flat (no target labels regardless of K)
+v2 and v3 made things **worse** despite higher eff_rank — higher eff_rank ≠ better cross-room transfer.
+v4 is the best overall. v5 improves exclusive_f1 slightly but hurts shared_f1 and B→A.
 
 ---
 
@@ -362,40 +336,37 @@ Each change targeted a specific diagnosed problem:
 | Oracle (true label) | 0.819 | **0.968** | 0.893 |
 | Predicted (classifier) | 0.819 | **0.968** | 0.893 |
 
-Since room accuracy = 100%, predicted routing equals oracle routing exactly.  
-Room B benefits significantly (+11.5%) from room-specific normalisation.  
-Room A shows small decrease because the joint model already favours Room A statistics.
+100% room accuracy → predicted routing = oracle routing exactly.
+Room B benefits +11.5% from room-specific normalisation.
 
 ---
 
 ## Struggles We Faced
 
-### 1. PCAP Decoding Complexity
-- No Python library for Nexmon CSI. Reverse-engineered BCM4366c0 binary format.
-- ~2 days debugging byte-order, endianness, and packet validity checks.
+### 1. PCAP Decoding Complexity (~2 days)
+No Python library for Nexmon CSI. Reverse-engineered BCM4366c0 binary format.
+Debugged byte-order, endianness, packet validity filtering from scratch.
 
 ### 2. VICReg γ=1.0 — Variance Term Never Fired
-- `var=0.000` in every epoch across all v1–v4 runs.
-- Embeddings converged with high cosine similarity between all classes.
-- NCM gave uniform probabilities. Diagnosed late; fixed with γ=2.5 in v5.
+`var=0.000` every epoch across v1–v4. Encoder converged with all embeddings pointing the same direction.
+NCM output uniform 0.20 probabilities. Diagnosed late; fixed with γ=2.5 in v5.
 
 ### 3. Encoder Retraining Regressions (v2, v3)
-- Stronger augmentations (v2) → higher eff_rank but **worse** cross-room F1.
-- Per-capture norm (v3) → train/inference mismatch → shared_f1 = 0.000.
-- Lesson: eff_rank is not a proxy for room-invariance.
+- v2 (stronger augmentation): higher eff_rank but **worse** cross-room F1
+- v3 (per-capture norm): train/inference normalization mismatch → shared_f1=0.000
+- Lesson: eff_rank is not a proxy for room-invariance
 
-### 4. Few-Shot Support Set Leakage
-- Initially counted windows as shots (one capture = 10+ windows).
-- Redesigned: capture is the atomic unit. K = K distinct captures.
-- Results dropped but became honest.
+### 4. Few-Shot Support Set — Window vs Capture Counting
+Initially counted windows as shots (one capture = 10+ windows = inflated K).
+Redesigned: capture is the atomic unit. Results dropped but became honest.
 
 ### 5. NCM Cosine Collapse
-- All cosine similarities ~0.97 → softmax → 0.20 uniform output.
-- Switching to LR: A→B excl_f1 0.193 → 0.693.
+Cosine similarity ~0.97 between all class pairs → uniform softmax output.
+Switching to LR: A→B excl_f1 0.193 (NCM) → **0.693** (LR).
 
 ### 6. CORAL Numerical Instability
-- Singular matrix errors during covariance inversion.
-- Fixed: ε=1e-5 regularisation + eigen-decomposition for matrix sqrt.
+Singular matrix errors during covariance inversion.
+Fixed: ε=1e-5 regularisation + eigen-decomposition for matrix square root.
 
 ---
 
@@ -406,16 +377,16 @@ Room A shows small decrease because the joint model already favours Room A stati
 - 100% accuracy even at T=10 — multipath patterns are highly distinctive
 
 **About SSL for CSI:**
-- Architecture inductive bias matters: random encoder (0.873) > VICReg+aug (0.700)
-- Same-capture pairs = trivial SSL task; cross-room pairs create real invariance pressure
+- Architecture inductive bias matters: random encoder (0.873 F1) > trained VICReg+aug (0.700)
+- Same-capture pairs = trivial SSL task → cross-room pairs create real invariance pressure
 - Masked reconstruction > contrastive for within-room activity recognition
-- γ matters: VICReg variance term must actually fire to have any effect
+- γ matters: VICReg variance term must actually fire to have any effect on directional spread
 
 **About Cross-Room Transfer:**
 - CORAL is necessary but not sufficient for shared activity transfer
-- Shared-only CORAL (fit on shared subspace only) significantly better than global
+- Shared-only CORAL significantly better than global (+73% shared_f1)
 - LR uses full embedding geometry; NCM only uses direction — critical difference at high cosine similarity
-- The gap: within-room LR = 0.91 F1 vs cross-room LR = 0.42 — that gap is the open research problem
+- The gap: within-room LR = 0.91 F1 vs cross-room LR = 0.42 — this gap is the open research problem
 
 ---
 
@@ -423,13 +394,13 @@ Room A shows small decrease because the joint model already favours Room A stati
 
 | Limitation | Impact |
 |-----------|--------|
-| Room A and B recorded in separate sessions | 100% room accuracy may exploit hardware state, not just environment |
+| Rooms recorded in separate sessions | 100% room accuracy may exploit hardware state, not just environment |
 | Room A: activity-specific spatial zones | Classifier may recognise location, not activity |
 | Only two rooms | Cannot claim generalisation to unseen environments |
 | No subject-disjoint guarantee | Results reflect capture-level disjointness only |
-| CORAL needs target dev data to fit | Not truly deployment-ready without target room data |
-| B→A CORAL noisier (3× fewer shared windows in Room A) | B→A consistently weaker than A→B |
-| v5 (γ=2.5) still training | Results not yet available |
+| CORAL needs target dev embeddings to fit | Not truly deployment-ready without setup data |
+| Room A has 3× fewer shared-activity windows | B→A CORAL noisier → consistently weaker than A→B |
+| v5 γ fix came late | Variance term firing but std_min still below γ=2.5 after 50 epochs |
 
 ---
 
@@ -437,14 +408,16 @@ Room A shows small decrease because the joint model already favours Room A stati
 
 | Task | Metric | Value |
 |------|--------|-------|
-| **Task 1** Room ID | Val accuracy | **1.000** |
-| **Task 2** SSL probe | Joint macro-F1 (masked MAE) | **0.853** |
-| **Task 2** SSL probe | Room B F1 (masked MAE) | **0.968** |
+| **Task 1** Room ID | Validation accuracy | **1.000** |
+| **Task 2** masked MAE probe | Joint macro-F1 | **0.853** |
+| **Task 2** masked MAE probe | Room B F1 | **0.968** |
 | **Task 3** A→B K=20 | Macro F1 | **0.422** |
-| **Task 3** A→B K=20 | Exclusive F1 | **0.693** |
-| **Task 3** A→B K=20 | Shared F1 | 0.241 |
+| **Task 3** A→B K=20 | Exclusive F1 (empty, lying) | **0.693** |
+| **Task 3** A→B K=5 | Shared F1 (sit, stand, walk) | **0.208** |
 | **Task 3** B→A K=20 | Macro F1 | **0.208** |
-| **Task 3** B→A K=20 | Exclusive F1 | **0.330** |
+| **Task 3** B→A K=20 | Exclusive F1 (fall, sitdown, standup) | **0.330** |
+
+All results: **v4 encoder + shared-only CORAL + LR head**, averaged over 10 seeds.
 
 ---
 
@@ -452,25 +425,24 @@ Room A shows small decrease because the joint model already favours Room A stati
 
 ```
 CSI_classifier/
-├── src/                    # Core modules
-│   ├── pcap_reader.py      # Nexmon PCAP parsing
-│   ├── csi_decode.py       # Packed-CSI reconstruction
-│   ├── cleaning.py         # Quality control (4 rules)
-│   ├── windowing.py        # (150, 256) window extraction
-│   ├── normalization.py    # log1p + z-score
-│   ├── encoder.py          # ResNet1DEncoder
-│   ├── ssl_train.py        # VICReg + Masked MAE
-│   ├── room_model.py       # Task 1 room classifier
-│   ├── align.py            # CORAL alignment
-│   └── fewshot.py          # Support sampling + PrototypeHead
+├── src/                     # Core modules
+│   ├── pcap_reader.py       # Nexmon PCAP parsing
+│   ├── csi_decode.py        # Packed-CSI reconstruction
+│   ├── cleaning.py          # Quality control (4 rules)
+│   ├── windowing.py         # (150, 256) window extraction
+│   ├── normalization.py     # log1p + per-window z-score
+│   ├── encoder.py           # ResNet1DEncoder
+│   ├── ssl_train.py         # VICReg + Masked MAE
+│   ├── room_model.py        # Task 1 room classifier
+│   ├── align.py             # CORAL alignment
+│   └── fewshot.py           # Support sampling
 ├── scripts/
 │   ├── build_intermediate.py
 │   ├── build_windows.py
-│   ├── fit_normalization.py
 │   ├── task2_eval.py
-│   └── sweep.py            # Task 3 K-shot sweep
-├── configs/experiment.yaml  # Single source of truth
-├── run_episode.py           # Demo entry point
+│   └── sweep.py             # Task 3 K-shot sweep
+├── configs/experiment.yaml  # All hyperparameters — single source of truth
+├── run_episode.py           # Entry point for single episode
 └── app.py                   # Streamlit demo UI
 ```
 
@@ -482,46 +454,46 @@ python run_episode.py --target_room B --K 5 --seed 42 \
     --predictions_out reports/predictions.csv
 ```
 
-All seeds fixed in `configs/experiment.yaml` — fully reproducible.
+All seeds fixed in `configs/experiment.yaml`. Fully reproducible.
 
 ---
 
 ## AI Use Disclosure
 
-**Tools used:** Kiro IDE with Claude for development assistance
+**Tools used:** Kiro IDE (Claude) for development assistance
 
 **AI-assisted:**
-- Code generation and debugging (encoder, SSL training, alignment, sweep)
-- Architecture suggestions (shared-only CORAL, cross-room pairs, γ fix)
-- Identifying root causes (var=0 issue, NCM cosine collapse)
+- Code generation and debugging across all pipeline components
+- Root cause diagnosis (var=0 issue, NCM cosine collapse, CORAL stale stats)
+- Architecture suggestions (shared-only CORAL, cross-room pairs, γ fix, LR head)
 - Report and presentation writing
 
 **Human validation:**
 - All code reviewed, understood, and tested by team members
 - Every team member can explain every preprocessing and modelling stage
 - Results verified through smoke tests, gate checks, and cross-validation
-- All technical claims verified against actual implementation and logs
+- All technical claims verified against actual logs and implementation
 
 ---
 
 ## Conclusion
 
-**What we built:** Complete Python pipeline from raw Nexmon PCAP to cross-room activity predictions.
+**Complete Python pipeline** from raw Nexmon PCAP to cross-room activity predictions.
 
-**What works well:**
-- Perfect room fingerprinting (Task 1: 100%)
-- Strong within-room activity recognition (Task 2: 0.853 joint F1)
-- Exclusive activity adaptation improves reliably with K (excl_f1: 0.693 at K=20)
+**What works:**
+- Perfect room fingerprinting (100%)
+- Strong within-room activity recognition (85–97% F1)
+- Exclusive activity adaptation scales reliably with K (excl_f1 = 0.693 at K=20)
 
 **The open problem:**
-- Shared activity zero-shot transfer plateaus at ~0.24 Shared F1
-- Encoder learned room-correlated features despite cross-room SSL training
-- Raising γ (v5, currently training) may push beyond this ceiling
+- Shared activity zero-shot transfer plateaus at ~0.21–0.25 shared F1
+- Within-room: 0.91 F1. Cross-room: 0.42 F1. That 0.49 gap is the research frontier.
+- Encoder learns room-correlated features despite cross-room SSL training
 
 **Critical insight:**
-> Closing the gap between within-room (0.91) and cross-room (0.42) F1  
-> requires the encoder to learn activity features that are  
-> *invariant to the physical environment* — not yet solved.
+> Closing the within-room to cross-room gap requires learning activity features
+> that are **invariant to the physical environment** —
+> not yet solved in WiFi-based HAR.
 
 ---
 
@@ -529,5 +501,5 @@ All seeds fixed in `configs/experiment.yaml` — fully reproducible.
 
 **CS60055 Ubiquitous Computing | Hackathon Challenge 2**
 
-*Cross-Room Few-Shot Adaptation —  
+*Cross-Room Few-Shot Adaptation —
 Environment-Aware, Label-Efficient Activity Recognition from WiFi CSI*
